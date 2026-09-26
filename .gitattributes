@@ -1,0 +1,98 @@
+# Line-ending policy for files synced from the MiSTer template (../Template_MiSTer).
+#
+# Scoped to EXACT paths on purpose: the repo currently has a mix of committed
+# line endings in sys/ (LF, CRLF, and a few mixed). A broad pattern like *.v or
+# *.sv would force-renormalize those existing blobs and produce huge whole-file
+# diffs. These exact paths cover only the files involved in the template update,
+# all of which are already stored as LF, so pinning them to eol=lf is churn-free.
+#
+# Effect: these files are treated as text and always stored/checked out with LF,
+# regardless of the editor or OS (immune to core.autocrlf).
+*.sv          text eol=lf
+
+# Quartus project files. Quartus on the Windows build box rewrites these with
+# CRLF on every compile, which otherwise shows up as a whole-file diff. Pinning
+# to eol=lf makes git normalize the working tree back to LF, so the Windows
+# rewrites become invisible. .qsf/.sdc blobs are already LF (churn-free); .qpf
+# was committed with CRLF and is renormalized to LF in this same commit.
+*.qsf         text eol=lf
+*.qpf         text eol=lf
+*.sdc         text eol=lf
+
+# Shell scripts MUST be LF. Nothing pinned them before, so on a Windows checkout
+# core.autocrlf gave them CRLF — and a CRLF `#!/bin/sh` script dies the moment it
+# runs anywhere POSIX. Hit for real on 2026-08-29: docs/tools/make-fastboot-rom.sh
+# under WSL failed with `set: Illegal option -` (dash reading `set -e\r`), which
+# blocked building the sim's fast-boot ROM. These scripts run on Linux, macOS, WSL
+# and on the MiSTer itself, so LF is not cosmetic here.
+*.sh          text eol=lf
+
+# ---------------------------------------------------------------------------
+# Binaries: never convert, never diff as text.
+#
+# This is the safety net that matters most for moving the repo between machines.
+# Disk images, ROMs and the prebuilt .tgz bundles all contain stray CR bytes, so
+# a heuristic can misread them as text -- and a single CRLF conversion silently
+# corrupts a 2 GB image or a boot ROM in a way nothing downstream would notice
+# until the machine refuses to boot. Marking them explicitly means no present or
+# future text rule can reach them.
+*.hda         binary
+*.dsk         binary
+*.adf         binary
+*.rom         binary
+*.nvr         binary
+*.BIN         binary
+*.tgz         binary
+*.gz          binary
+*.zip         binary
+*.pdf         binary
+*.png         binary
+*.jpg         binary
+
+# ---------------------------------------------------------------------------
+# Executed or parsed by POSIX tools, where CRLF is a hard failure rather than
+# cosmetic: a CRLF shebang makes the kernel hunt for an interpreter with a
+# trailing CR, and a CRLF Makefile feeds \r into every recipe line. (*.sh is
+# pinned above, after exactly that bit us under WSL.) All of these blobs are
+# already stored LF, so pinning them is churn-free.
+*.py          text eol=lf
+*.tcl         text eol=lf
+Makefile      text eol=lf
+*.mk          text eol=lf
+*.md          text eol=lf
+*.asm         text eol=lf
+
+# Windows batch files want CRLF. They are already stored that way, so pin them
+# byte-exact rather than switching to store-LF/check-out-CRLF: that would be a
+# whole-file rewrite for no behavioural gain.
+*.bat         -text
+
+# ---------------------------------------------------------------------------
+# NOT normalized, deliberately:
+#
+#   sys/**                  vendored from ../Template_MiSTer with a mix of LF
+#                           and CRLF blobs. Renormalizing would turn every
+#                           future template sync into a whole-file diff and
+#                           destroy the ability to diff against upstream. The
+#                           files are Verilog/Tcl read by Quartus and Verilator,
+#                           both of which accept CRLF, so there is nothing to
+#                           gain. (*.sv above predates this and stays as-is.)
+#   SingleStepTests/gen/*.c/.h   generated corpora, megabytes each; the diff
+#                           would swamp history for no benefit.
+#   verilator/sim/m68k_dasm.*    vendored disassembler, same reasoning as sys/.
+#
+# Enforced with `-text` (check out byte-exact as committed) rather than left
+# unmarked: an unmarked file still gets rewritten by `git add --renormalize` or
+# by core.autocrlf on a Windows checkout, which is how a "targeted" policy
+# quietly turns into a 5,000-line diff. `-text` is what actually holds the line.
+#
+# For files under sys/ this supersedes the *.sv pin at the top of this file.
+# No behaviour changes today -- those blobs are stored LF, and `-text` checks
+# them out as stored -- it only stops them being renormalized later.
+sys/**                              -text
+verilator/sim/m68k_dasm.h           -text
+verilator/sim/m68k_dasm_stubs.cpp   -text
+SingleStepTests/gen/*.c             -text
+SingleStepTests/gen/*.h             -text
+rtl/mycore.v                        -text
+rtl/lfsr.v                          -text
