@@ -78,9 +78,9 @@ module tc_machine
 	output     [31:0] tmc_hreg,
 	output     [31:0] tmc_vreg,
 	output            video_enable,
-	output    [127:0] lut_r,
-	output    [127:0] lut_g,
-	output    [127:0] lut_b,
+	output      [2:0] pal_we,           // Bt463 display-palette writes (R, G, B one-hot)
+	output      [3:0] pal_n,
+	output      [7:0] pal_d,
 	input             vbl_pulse,          // clk domain, one pulse per frame
 
 	// peripherals
@@ -446,7 +446,7 @@ tc_bt463 dac (
 	.clk(clk), .reset(dev_rst),
 	.stb(io_stb && io_dev == D_DAC && !io_tmc), .we(io_we), .be(io_be), .wdata(io_wdata),
 	.rdata(dac_rdata), .ack(dac_ack),
-	.lut_r(lut_r), .lut_g(lut_g), .lut_b(lut_b)
+	.pal_we(pal_we), .pal_n(pal_n), .pal_d(pal_d)
 );
 
 // KMS (keyboard / mouse; sound later)

@@ -17,11 +17,22 @@
 //  16 types (planes field = 8, true colour, start 0) and read masks $F0
 //  (HS 4.2), so each 4-bit channel value n of a pixel addresses entry
 //  n << 4 of that channel's palette, and only entries $00,$10,...,$F0
-//  matter.  Their R/G/B bytes are kept in lut_r/g/b for the scan-out
-//  (tc_video.sv).  Other palette entries accept writes and read back 0;
-//  the overlay/cursor colours and blink masks are accepted and ignored.
-//  Reset contents: a linear ramp (n * $11), so a picture is visible before
-//  the ROM loads the gamma table.
+//  matter.  Other palette entries accept writes and read back 0; the
+//  overlay/cursor colours and blink masks are accepted and ignored.
+//
+//  Storage is block RAM, not flip-flops (area): the registers and the
+//  host's copy of the 16 x 3 display entries in one 64 x 8 M10K, the
+//  window-type table in a 16 x 24 M10K, both read continuously at the
+//  current address (it changes only on an access, and accesses are
+//  several clocks apart), so an access finds its byte already read.  Every
+//  display-palette write also goes out on pal_we/pal_n/pal_d to the
+//  scan-out's own palette RAMs (tc_vram.sv), which the pixel nibbles read
+//  in the video clock domain.
+//  Contents at power-up: registers 0, window types $000100, palette a
+//  linear ramp (n * $11); the video palette RAMs start at 0.  A machine
+//  reset keeps them (block RAM has no reset): the ROM reprograms every
+//  register, window type and palette entry in dac_init_bt463 (HS 4.2)
+//  before it enables video, and video is black until then.
 //
 //  Device port contract (tc_machine): stb 1-cycle, ack 1-cycle one clock
 //  later; be[3] = byte at +0.  One byte lane per access (the ROM uses
@@ -40,26 +51,15 @@ module tc_bt463
 	output reg [31:0] rdata,
 	output reg        ack,
 
-	output    [127:0] lut_r,         // entry n in [8n+7:8n], n = pixel nibble
-	output    [127:0] lut_g,
-	output    [127:0] lut_b
+	// display palette writes, for the scan-out's palette RAMs (clk domain)
+	output reg  [2:0] pal_we,        // one-hot: R, G, B
+	output reg  [3:0] pal_n,         // entry n << 4
+	output reg  [7:0] pal_d
 );
 
 reg [11:0] addr;
 reg  [1:0] idx;
-reg  [7:0] regs [0:15];
-reg [23:0] wtt  [0:15];
-reg [23:0] wtt_tmp;
-reg  [7:0] pr [0:15], pg [0:15], pb [0:15];
-
-genvar gi;
-generate
-for (gi = 0; gi < 16; gi = gi + 1) begin : g_lut
-	assign lut_r[8*gi+7:8*gi] = pr[gi];
-	assign lut_g[8*gi+7:8*gi] = pg[gi];
-	assign lut_b[8*gi+7:8*gi] = pb[gi];
-end
-endgenerate
+reg [15:0] wtt_tmp;
 
 // the byte lane of this access: 0..3 = +0..+3
 wire [1:0] lane = be[3] ? 2'd0 : be[2] ? 2'd1 : be[1] ? 2'd2 : 2'd3;
@@ -68,25 +68,62 @@ wire [7:0] wb   = (lane == 2'd0) ? wdata[31:24] : (lane == 2'd1) ? wdata[23:16] 
 
 // the palette entry a palette access at addr hits in the display LUT
 wire       pal_disp = (addr[11:8] == 4'd0) && (addr[3:0] == 4'd0);   // entries $00..$F0
-wire [3:0] pal_n    = addr[7:4];
+wire [3:0] pal_idx  = addr[7:4];
 
-reg  [7:0] rb;
+//----------------------------------------------------------------------------
+// storage: cmem = {section, n}: section 0 registers $0200..$020F, 1..3 the
+// palette R, G, B bytes of entry n << 4; wmem = window types $0300..$030F
+//----------------------------------------------------------------------------
+(* ramstyle = "M10K, no_rw_check" *) reg  [7:0] cmem [0:63];
+(* ramstyle = "M10K, no_rw_check" *) reg [23:0] wmem [0:15];
+reg  [7:0] cq;
+reg [23:0] wq;
+
 integer i;
+initial begin
+	for (i = 0; i < 16; i = i + 1) begin
+		cmem[i]      = 8'd0;
+		cmem[16 + i] = {i[3:0], i[3:0]};
+		cmem[32 + i] = {i[3:0], i[3:0]};
+		cmem[48 + i] = {i[3:0], i[3:0]};
+		wmem[i]      = 24'h000100;
+	end
+end
+
+// what the next access at this address and byte index reads: a register
+// when the address is in $02xx, else the palette byte idx of entry addr[7:4]
+wire [5:0] c_raddr = (addr[11:8] == 4'h2) ? {2'd0, addr[3:0]} : {idx + 2'd1, pal_idx};
+
+// this access's write, if any
+wire       w_reg = stb && we && lane == 2'd2 && addr[11:8] == 4'h2 && addr[7:4] == 4'h0 &&
+                   addr[3:0] != 4'h0;
+wire       w_pal = stb && we && lane == 2'd3 && pal_disp && idx != 2'd3;
+wire       w_wtt = stb && we && lane == 2'd2 && addr[11:8] == 4'h3 && addr[7:4] == 4'h0 &&
+                   idx == 2'd2;
+wire [5:0] c_waddr = w_pal ? {idx + 2'd1, pal_idx} : {2'd0, addr[3:0]};
 
 always @(posedge clk) begin
-	ack <= 0;
+	if (w_reg || w_pal) cmem[c_waddr] <= wb;
+	if (w_wtt) wmem[addr[3:0]] <= {wb, wtt_tmp};
+	cq <= cmem[c_raddr];
+	wq <= wmem[addr[3:0]];
+end
+
+//----------------------------------------------------------------------------
+// the host port
+//----------------------------------------------------------------------------
+reg  [7:0] rb;
+
+always @(posedge clk) begin
+	ack    <= 0;
+	pal_we <= 3'd0;
 	if (reset) begin
-		addr <= 0;
-		idx  <= 0;
-		for (i = 0; i < 16; i = i + 1) begin
-			regs[i] <= 8'd0;
-			wtt[i]  <= 24'h000100;
-			pr[i]   <= {i[3:0], i[3:0]};
-			pg[i]   <= {i[3:0], i[3:0]};
-			pb[i]   <= {i[3:0], i[3:0]};
-		end
+		addr    <= 0;
+		idx     <= 0;
 		wtt_tmp <= 0;
 		rdata   <= 0;
+		pal_n   <= 0;
+		pal_d   <= 0;
 	end
 	else if (stb) begin
 		ack <= 1;
@@ -112,8 +149,7 @@ always @(posedge clk) begin
 			4'h2: begin                              // registers (bt463_read/write_reg)
 				if (addr[7:0] < 8'h10) begin
 					if (addr[3:0] == 4'h0) rb = 8'h2A;     // ID
-					else rb = regs[addr[3:0]];
-					if (we && addr[3:0] != 4'h0) regs[addr[3:0]] <= wb;
+					else rb = cq;
 				end
 				else if (addr[7:0] == 8'h20) rb = 8'h0A;  // revision
 				idx  <= 0;
@@ -122,12 +158,9 @@ always @(posedge clk) begin
 			4'h3: begin                              // window-type table, 3 bytes LSB first
 				if (addr[7:0] < 8'h10) begin
 					case (idx)
-					2'd0: begin rb = wtt[addr[3:0]][7:0];   if (we) wtt_tmp <= {16'd0, wb}; end
-					2'd1: begin rb = wtt[addr[3:0]][15:8];  if (we) wtt_tmp[15:8] <= wb; end
-					default: begin
-						rb = wtt[addr[3:0]][23:16];
-						if (we) wtt[addr[3:0]] <= {wb, wtt_tmp[15:0]};
-					end
+					2'd0: begin rb = wq[7:0];   if (we) wtt_tmp <= {8'd0, wb}; end
+					2'd1: begin rb = wq[15:8];  if (we) wtt_tmp[15:8] <= wb; end
+					default: rb = wq[23:16];                // written above (w_wtt)
 					endcase
 				end
 				if (idx == 2'd2) begin idx <= 0; addr <= addr + 12'd1; end
@@ -138,11 +171,12 @@ always @(posedge clk) begin
 		end
 		default: begin                               // palette data R, G, B
 			if (pal_disp) begin
-				case (idx)
-				2'd0: begin rb = pr[pal_n]; if (we) pr[pal_n] <= wb; end
-				2'd1: begin rb = pg[pal_n]; if (we) pg[pal_n] <= wb; end
-				default: begin rb = pb[pal_n]; if (we) pb[pal_n] <= wb; end
-				endcase
+				rb = cq;
+				if (we) begin
+					pal_we <= 3'b001 << idx;
+					pal_n  <= pal_idx;
+					pal_d  <= wb;
+				end
 			end
 			if (idx == 2'd2) begin idx <= 0; addr <= addr + 12'd1; end
 			else idx <= idx + 2'd1;

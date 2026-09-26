@@ -54,9 +54,9 @@ module tc_vram
 	input      [31:0] hreg,
 	input      [31:0] vreg,
 	input             video_enable,
-	input     [127:0] lut_r,
-	input     [127:0] lut_g,
-	input     [127:0] lut_b,
+	input       [2:0] pal_we,         // clk_sys: Bt463 display-palette write (R, G, B one-hot)
+	input       [3:0] pal_n,
+	input       [7:0] pal_d,
 	output reg        vbl_pulse,      // clk_sys: one pulse per frame (vertical blank start)
 
 	// video out (clk_vid)
@@ -399,14 +399,26 @@ tc_dpram_dc #(.AW(10), .DW(64)) linebuf (
 // clk_vid: pixel pipeline
 //   c0: timing outputs (t_*)       -> line buffer address
 //   c1: RAM address registered     -> q valid at c2
-//   c2: pixel select + LUT         -> VGA registers at c3
+//   c2: pixel select: the channel nibbles address the palette RAMs
+//   c3: palette bytes valid        -> VGA registers at c4
+//
+// The Bt463 display palette (16 entries per channel, tc_bt463.sv) lives in
+// three dual-clock M10K RAMs, written from clk_sys by the Bt463's palette
+// writes and read here by the pixel's R, G and B nibbles: no copy of the
+// table in flip-flops and no multi-bit clock crossing.
 //============================================================================
-reg [127:0] lr_meta, lg_meta, lb_meta, lr_v, lg_v, lb_v;
-always @(posedge clk_vid) begin
-	lr_meta <= lut_r; lr_v <= lr_meta;
-	lg_meta <= lut_g; lg_v <= lg_meta;
-	lb_meta <= lut_b; lb_v <= lb_meta;
-end
+wire [7:0] pal_r, pal_g, pal_b;
+wire [3:0] pr, pg, pb;             // the pixel's channel nibbles (c2)
+
+tc_dpram_dc #(.AW(4), .DW(8)) pal_ram_r (
+	.wclk(clk_sys), .we(pal_we[0]), .waddr(pal_n), .wdata(pal_d),
+	.rclk(clk_vid), .raddr(pr), .q(pal_r));
+tc_dpram_dc #(.AW(4), .DW(8)) pal_ram_g (
+	.wclk(clk_sys), .we(pal_we[1]), .waddr(pal_n), .wdata(pal_d),
+	.rclk(clk_vid), .raddr(pg), .q(pal_g));
+tc_dpram_dc #(.AW(4), .DW(8)) pal_ram_b (
+	.wclk(clk_sys), .we(pal_we[2]), .waddr(pal_n), .wdata(pal_d),
+	.rclk(clk_vid), .raddr(pb), .q(pal_b));
 
 reg  [1:0] px1, px2;
 reg  [2:0] hs_p, vs_p, de_p;
@@ -422,6 +434,10 @@ always @(posedge clk_vid) begin
 	hs_p[1]  <= hs_p[0];
 	vs_p[1]  <= vs_p[0];
 	de_p[1]  <= de_p[0];
+	// c2 -> c3 (the palette RAMs register the nibbles)
+	hs_p[2]  <= hs_p[1];
+	vs_p[2]  <= vs_p[1];
+	de_p[2]  <= de_p[1];
 end
 
 // the pixel: bytes 2p (high) and 2p+1 of the little-endian DDR word
@@ -429,16 +445,18 @@ wire [15:0] pix = (px2 == 2'd0) ? {lb_q[7:0],   lb_q[15:8]}  :
                   (px2 == 2'd1) ? {lb_q[23:16], lb_q[31:24]} :
                   (px2 == 2'd2) ? {lb_q[39:32], lb_q[47:40]} :
                                   {lb_q[55:48], lb_q[63:56]};
-wire [3:0] pr = pix[15:12], pg = pix[11:8], pb = pix[7:4];
+assign pr = pix[15:12];
+assign pg = pix[11:8];
+assign pb = pix[7:4];
 
 always @(posedge clk_vid) begin
-	vga_hs <= hs_p[1];
-	vga_vs <= vs_p[1];
-	vga_de <= de_p[1];
-	if (de_p[1] && ven_v) begin
-		vga_r <= lr_v[{pr, 3'd0} +: 8];
-		vga_g <= lg_v[{pg, 3'd0} +: 8];
-		vga_b <= lb_v[{pb, 3'd0} +: 8];
+	vga_hs <= hs_p[2];
+	vga_vs <= vs_p[2];
+	vga_de <= de_p[2];
+	if (de_p[2] && ven_v) begin
+		vga_r <= pal_r;
+		vga_g <= pal_g;
+		vga_b <= pal_b;
 	end
 	else {vga_r, vga_g, vga_b} <= 24'd0;
 end

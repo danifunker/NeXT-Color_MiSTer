@@ -106,6 +106,28 @@ wire        vbl_pulse;
 wire [255:0] debug_status;
 wire [127:0] debug_status2;
 
+// the Bt463 display palette: the machine sends its writes to the scan-out's
+// palette RAMs (tc_vram); this sim-only copy feeds the PNG dumper's lut_*
+wire  [2:0] pal_we;
+wire  [3:0] pal_n;
+wire  [7:0] pal_d;
+reg   [7:0] sh_r [0:15], sh_g [0:15], sh_b [0:15];
+integer shi;
+initial for (shi = 0; shi < 16; shi = shi + 1) begin
+	sh_r[shi] = 8'd0; sh_g[shi] = 8'd0; sh_b[shi] = 8'd0;
+end
+always @(posedge clk_sys) begin
+	if (pal_we[0]) sh_r[pal_n] <= pal_d;
+	if (pal_we[1]) sh_g[pal_n] <= pal_d;
+	if (pal_we[2]) sh_b[pal_n] <= pal_d;
+end
+genvar shg;
+generate for (shg = 0; shg < 16; shg = shg + 1) begin : g_sh
+	assign lut_r[8*shg +: 8] = sh_r[shg];
+	assign lut_g[8*shg +: 8] = sh_g[shg];
+	assign lut_b[8*shg +: 8] = sh_b[shg];
+end endgenerate
+
 wire  [2:0] sd_unit;
 wire [31:0] sd_lba;
 wire        sd_rd, sd_wr;
@@ -145,9 +167,9 @@ tc_machine machine
 	.tmc_hreg(hreg),
 	.tmc_vreg(vreg),
 	.video_enable(video_enable),
-	.lut_r(lut_r),
-	.lut_g(lut_g),
-	.lut_b(lut_b),
+	.pal_we(pal_we),
+	.pal_n(pal_n),
+	.pal_d(pal_d),
 	.vbl_pulse(vbl_pulse),
 
 	.ps2_key(ps2_key),
@@ -254,9 +276,9 @@ tc_memsys memsys
 	.hreg(hreg),
 	.vreg(vreg),
 	.video_enable(video_enable),
-	.lut_r(lut_r),
-	.lut_g(lut_g),
-	.lut_b(lut_b),
+	.pal_we(pal_we),
+	.pal_n(pal_n),
+	.pal_d(pal_d),
 	.vbl_pulse(vbl_pulse),
 	.vga_r(VGA_R),
 	.vga_g(VGA_G),

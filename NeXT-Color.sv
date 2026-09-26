@@ -256,7 +256,9 @@ wire [26:4] mem_line_pending_tag;
 
 wire [31:0] tmc_hreg, tmc_vreg;
 wire        video_enable;
-wire [127:0] lut_r, lut_g, lut_b;
+wire   [2:0] pal_we;
+wire   [3:0] pal_n;
+wire   [7:0] pal_d;
 wire        vbl_pulse;
 wire        led;
 
@@ -290,9 +292,9 @@ tc_machine machine
 	.tmc_hreg(tmc_hreg),
 	.tmc_vreg(tmc_vreg),
 	.video_enable(video_enable),
-	.lut_r(lut_r),
-	.lut_g(lut_g),
-	.lut_b(lut_b),
+	.pal_we(pal_we),
+	.pal_n(pal_n),
+	.pal_d(pal_d),
 	.vbl_pulse(vbl_pulse),
 
 	.ps2_key(ps2_key),
@@ -374,9 +376,9 @@ tc_memsys memsys
 	.hreg(tmc_hreg),
 	.vreg(tmc_vreg),
 	.video_enable(video_enable),
-	.lut_r(lut_r),
-	.lut_g(lut_g),
-	.lut_b(lut_b),
+	.pal_we(pal_we),
+	.pal_n(pal_n),
+	.pal_d(pal_d),
 	.vbl_pulse(vbl_pulse),
 	.vga_r(vga_r),
 	.vga_g(vga_g),
