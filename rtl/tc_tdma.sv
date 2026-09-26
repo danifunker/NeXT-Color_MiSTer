@@ -242,10 +242,19 @@ wire [31:0] t_end = {2'b00, t_limit[29:0]};      // ENADDR(limit), dma.c:798
 
 assign sc_enable   = c_en[C_SCSI];
 assign sc_dev2m    = c_dir[C_SCSI];
-assign sc_room     = s_next < s_limit;
-assign sc_at_limit = s_next == s_limit;
+// One subtraction per channel gives every comparison its engine needs
+// (area): borrow = Next > Limit, zero = Next == Limit, and the high bits
+// say whether a longword still fits.
+wire [32:0] s_d = {1'b0, s_limit} - {1'b0, s_next};
+wire        s_eq = (s_d[31:0] == 32'd0);
+wire        s_lt = !s_d[32] && !s_eq;                     // Next < Limit
+wire        s_clamp = s_d[32] || (s_d[31:2] == 30'd0);    // Next + 4 > Limit
+wire [32:0] t_d = {1'b0, t_end} - {1'b0, t_next};
+
+assign sc_room     = s_lt;
+assign sc_at_limit = s_eq;
 assign et_enable   = c_en[C_ENTX];
-assign et_room     = t_next < t_end;
+assign et_room     = !t_d[32] && (t_d[31:0] != 32'd0);
 assign er_enable   = c_en[C_ENRX];
 assign er_room     = r_next < r_limit;
 
@@ -339,8 +348,7 @@ reg orphan;             // the SCSI client dropped its request before the word f
 
 // the TX frame's bytes left in the longword at Next (Next stays on a
 // longword until the frame's last one)
-wire [31:0] t_left = t_end - t_next;
-wire  [2:0] t_n    = (t_left >= 32'd4) ? 3'd4 : t_left[2:0];
+wire  [2:0] t_n    = (t_d[31:2] != 30'd0) ? 3'd4 : t_d[2:0];   // only used while Next < end
 
 // dma.c:855-859: without SUPDATE, Next goes back to the start of its burst
 // and, while that is below Limit, on to the next burst
@@ -409,7 +417,7 @@ always @(posedge clk) begin : engine
 					sc_ack <= sc_req && !orphan;
 					sc_rdata <= m_rdata;
 					// a malformed limit must not carry Next past it (next_scsi)
-					s_next <= (s_next + 32'd4 > s_limit) ? s_limit : s_next + 32'd4;
+					s_next <= s_clamp ? s_limit : s_next + 32'd4;
 				end
 				O_ENRX: begin
 					er_ack <= 1'b1;
@@ -459,7 +467,7 @@ always @(posedge clk) begin : engine
 			eval_pend <= 1'b1;
 		else if (sc_eval || eval_pend) begin
 			eval_pend <= 1'b0;
-			if (c_en[C_SCSI] && s_next >= s_limit) begin
+			if (c_en[C_SCSI] && !s_lt) begin
 				ev[C_SCSI] = 1'b1;
 				c_cmp[C_SCSI] <= 1'b1;
 				if (c_sup[C_SCSI]) begin

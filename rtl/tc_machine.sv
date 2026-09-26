@@ -628,11 +628,17 @@ reg  [26:2] wr_split_addr;
 reg   [3:0] wr_split_be;
 reg  [31:0] wr_split_data;
 wire        bus_wr_span  = (bus_wr_end > 3'd4);
-wire [31:2] bus_addr_nx  = bus_addr[31:2] + 30'd1;
+// A store spanning into the next longword stays on the direct path only
+// when that longword is in the same aligned 8 MB block (the smallest bank /
+// alias unit, HS 3.3): it is then present RAM too, and its SDRAM address is
+// the first one's plus one in the low 21 bits (area: no second adder,
+// decode and translation).  The rare store on the block's last longword
+// goes through the adapter like any other access.
+wire        bus_wr_nx_ok = ~&bus_addr[22:2];
 wire bus_wr_direct = (DIRECT_WRITES != 0) && (svc == S_IDLE) && !walker_pend && !cpu_berr &&
                      !bus_miss_ack && !bus_line_ack && !bus_adapter_active && !wr_split_pend &&
                      !bus_ack_adapter && bus_req && bus_write &&
-                     (!bus_wr_span || (decode(bus_addr_nx) == 3'd0)) &&
+                     (!bus_wr_span || bus_wr_nx_ok) &&
                      (decode(bus_addr[31:2]) == 3'd0) && mem_wq_room;
 
 assign bus_req_adapter = bus_req && !bus_line_match && !bus_line_wait && !bus_wr_direct && !wr_split_pend &&
@@ -772,7 +778,7 @@ always @(posedge clk) begin
 					mem_wp_data  <= bus_wr_left >> {bus_addr[1:0], 3'd0};
 					if (bus_wr_span) begin
 						wr_split_pend <= 1;
-						wr_split_addr <= ram_sdram(bus_addr_nx);
+						wr_split_addr <= {bus_sdram[26:23], bus_addr[22:2] + 21'd1};
 						wr_split_be   <= 4'b1111 << (4'd8 - {1'b0, bus_wr_end});
 						wr_split_data <= bus_wr_left << {3'd4 - {1'b0, bus_addr[1:0]}, 3'd0};
 					end

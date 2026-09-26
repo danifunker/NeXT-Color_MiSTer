@@ -131,7 +131,7 @@ wire [60:0] wq_q;
 wire wq_push_bus = !init && !wp_valid && req && we && !rbusy && !ack && !fill_pending && !wq_full;
 wire wq_push = !init && (wp_valid || wq_push_bus);
 wire [60:0] wq_push_data = wp_valid ? {wp_addr, wp_data, wp_be} : {addr, wdata, be};
-// The queue slot is only consumed after publication through wq_wp_handoff.
+// The queue slot is only consumed after publication through wq_pend_n.
 // Explicit asynchronous MLAB read preserves the existing capture edge.
 `ifdef VERILATOR
 // Behavioral counterpart for queue simulation: synchronous write, asynchronous
@@ -162,7 +162,13 @@ altdpram #(
 `endif
 reg   [3:0] wq_wp   = 0;             // clk_sys: next free slot (bit 3 = wrap)
 reg   [3:0] wq_rp   = 0;             // clk_ram: next slot to drain
-reg   [3:0] wq_wp_handoff = 0;       // wq_wp seen on clk_ram's falling edge
+// wq_wp seen on clk_ram's falling edge, already compared with the drain
+// pointer there: "a published write is waiting".  wq_rp only moves on the
+// rising edge, so this is the decision the rising edge used to take from a
+// falling-edge copy of wq_wp, one logic level earlier in the half-period
+// path to the write-start enables (NeXT-Color 2026-09-26 fit: -0.673 ns on
+// that path with the compare in it).
+reg         wq_pend_n = 0;
 reg   [3:0] wq_rp_handoff = 0;       // wq_rp seen on clk_ram's falling edge
 // The read pointer crosses into clk_sys through one plain register, and
 // everything clk_sys derives from it (full, empty, room) is computed from
@@ -240,7 +246,7 @@ assign line_pending_o     = fill_pending;
 assign line_pending_tag_o = r_addr[26:4];
 
 always @(negedge clk_ram) begin
-	wq_wp_handoff <= wq_wp;
+	wq_pend_n     <= (wq_wp != wq_rp);
 	wq_rp_handoff <= wq_rp;
 	req_handoff  <= req_tgl;
 	ack_handoff  <= ack_tgl;
@@ -350,7 +356,7 @@ always @(posedge clk_ram) begin
 		else rd_word <= rd_word + 1'b1;
 	end
 	else if (!busy_r) begin
-		if (wq_wp_handoff != wq_rp) begin
+		if (wq_pend_n) begin
 			acc      <= 0;
 			rd_word  <= 0;
 			busy_r   <= 1;

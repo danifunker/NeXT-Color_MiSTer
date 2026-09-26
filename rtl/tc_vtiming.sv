@@ -20,6 +20,13 @@
 //  from clk_sys; they are quasi-static, so they are re-sampled through two
 //  flops and only taken at the end of a frame, which keeps a mid-frame write
 //  from tearing the picture.  A zero display or sync field is ignored.
+//
+//  The line and frame thresholds (sync start/end, total, the line_pre point)
+//  are computed from the re-sampled registers in their own pipeline stage
+//  and loaded with the geometry at the frame boundary, so the per-pixel
+//  logic only compares the counters with registered constants (timing: the
+//  three cascaded adders used to sit between the counters and their
+//  reload).
 //============================================================================
 
 module tc_vtiming
@@ -55,16 +62,45 @@ always @(posedge clk_vid) begin
 	vreg_m <= vreg; vreg_s <= vreg_m;
 end
 
-reg [31:0] hcur, vcur;                 // geometry in use this frame
+// thresholds of a geometry register pair (display, sync start, sync end,
+// last pixel / line of the frame, the line_pre pixel)
+function automatic [69:0] h_thr;         // {disp, sy0, sy1, tot-1, tot-PRE_LINE}
+	input [31:0] r;
+	reg [13:0] d, s0, s1, t;
+	begin
+		d  = {r[11:0], 2'b00};
+		s0 = d  + {5'd0, r[31:25], 2'b00};
+		s1 = s0 + {6'd0, r[24:19], 2'b00};
+		t  = s1 + {5'd0, r[18:12], 2'b00};
+		h_thr = {d, s0, s1, t - 14'd1, t - PRE_LINE};
+	end
+endfunction
+function automatic [47:0] v_thr;         // {disp, sy0, sy1, tot-1}
+	input [31:0] r;
+	reg [11:0] d, s0, s1, t;
+	begin
+		d  = r[11:0];
+		s0 = d  + {5'd0, r[31:25]};
+		s1 = s0 + {6'd0, r[24:19]};
+		t  = s1 + {5'd0, r[18:12]};
+		v_thr = {d, s0, s1, t - 12'd1};
+	end
+endfunction
 
-wire [13:0] h_disp = {hcur[11:0], 2'b00};
-wire [13:0] h_sy0  = h_disp + {5'd0, hcur[31:25], 2'b00};
-wire [13:0] h_sy1  = h_sy0  + {6'd0, hcur[24:19], 2'b00};
-wire [13:0] h_tot  = h_sy1  + {5'd0, hcur[18:12], 2'b00};
-wire [11:0] v_disp = vcur[11:0];
-wire [11:0] v_sy0  = v_disp + {5'd0, vcur[31:25]};
-wire [11:0] v_sy1  = v_sy0  + {6'd0, vcur[24:19]};
-wire [11:0] v_tot  = v_sy1  + {5'd0, vcur[18:12]};
+// the next geometry's thresholds (pipeline stage after the re-sampling)
+reg [69:0] h_nx;
+reg [47:0] v_nx;
+reg        h_nx_ok, v_nx_ok;
+always @(posedge clk_vid) begin
+	h_nx    <= h_thr(hreg_s);
+	v_nx    <= v_thr(vreg_s);
+	h_nx_ok <= (hreg_s[11:0] != 0 && hreg_s[24:19] != 0);
+	v_nx_ok <= (vreg_s[11:0] != 0 && vreg_s[24:19] != 0);
+end
+
+// the geometry in use this frame
+reg [13:0] h_disp, h_sy0, h_sy1, h_last, h_pre;
+reg [11:0] v_disp, v_sy0, v_sy1, v_last;
 
 assign h_active = h_disp;
 assign v_active = v_disp;
@@ -72,8 +108,8 @@ assign v_active = v_disp;
 reg [13:0] hc;
 reg [11:0] vc;
 
-wire h_end = (hc + 14'd1 >= h_tot);
-wire v_end = (vc + 12'd1 >= v_tot);
+wire h_end = (hc >= h_last);             // hc + 1 >= total
+wire v_end = (vc >= v_last);
 
 // the line that line_pre announces: the next visible line
 wire [11:0] vc_next = v_end ? 12'd0 : vc + 12'd1;
@@ -83,8 +119,8 @@ always @(posedge clk_vid) begin
 	frame_start <= 0;
 	vbl_start   <= 0;
 	if (reset) begin
-		hcur <= H_RESET;
-		vcur <= V_RESET;
+		{h_disp, h_sy0, h_sy1, h_last, h_pre} <= h_thr(H_RESET);
+		{v_disp, v_sy0, v_sy1, v_last}        <= v_thr(V_RESET);
 		hc <= 0; vc <= 0;
 		hs <= 0; vs <= 0; hblank <= 0; vblank <= 0; x <= 0; y <= 0;
 	end
@@ -94,8 +130,8 @@ always @(posedge clk_vid) begin
 			if (v_end) begin
 				vc <= 0;
 				// frame boundary: take new geometry
-				if (hreg_s[11:0] != 0 && hreg_s[24:19] != 0) hcur <= hreg_s;
-				if (vreg_s[11:0] != 0 && vreg_s[24:19] != 0) vcur <= vreg_s;
+				if (h_nx_ok) {h_disp, h_sy0, h_sy1, h_last, h_pre} <= h_nx;
+				if (v_nx_ok) {v_disp, v_sy0, v_sy1, v_last}        <= v_nx;
 			end
 			else vc <= vc + 12'd1;
 		end
@@ -111,7 +147,7 @@ always @(posedge clk_vid) begin
 		frame_start <= (hc == 0) && (vc == 0);
 		vbl_start   <= (hc == 0) && (vc == v_disp);
 		// announce the next visible line PRE_LINE pixels before its start
-		if (hc + PRE_LINE == h_tot && vc_next < v_disp) line_pre <= 1;
+		if (hc == h_pre && vc_next < v_disp) line_pre <= 1;
 	end
 end
 
