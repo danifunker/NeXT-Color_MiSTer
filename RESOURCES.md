@@ -121,7 +121,7 @@ engine, T7213 front-end, Bt463 + 16bpp scan-out, color VRAM, ADB.
 - Everything needed for this project is in `scratch/resources/`. `scratch/` is gitignored, so a fresh clone will not have it; recreate it from the original locations listed in `scratch/resources/README.md`.
 - `NM` is a partial re-mirror (see its `MISSING_refused_exe.txt`, which lists refused WebObjects `.exe` patches; `state*.json`, `fetch*.log` are scraper state). It has no `Docs` folder. Neither mirror is complete on its own: `NF` has all the docs, but `NM` has far more OS media, the kernel/DriverKit archives and the diagnostics (`NF`'s `Diagnostic_Utilities` folder is empty).
 - The `NF` copy is 10 GB and `NM` is 8.7 GB, and most of that is software that isn't relevant here. Only what is listed in this file was copied.
-- This folder is not a git repository yet.
+- This folder is a git repository with the MiSTer template, renamed to the core name `NeXT-Color` (`NeXT-Color.qpf`, `.qsf`, `.sv`, and so on).
 
 ## 8. Suggested reading order
 

@@ -1,9 +1,9 @@
-# Template core for MiSTer
+# NeXT-Color core for MiSTer
 
 ## General description
-This core contains the latest version of framework and will be updated when framework is updated. There will be no releases. This core is only for developers. Besides the framework, core demonstrates the basic usage. New or ported cores should use it as a template.
+A NeXTstation Turbo Color (33 MHz 68040, Turbo chipset, 12-bit color, 1120x832) core for MiSTer. Work in progress: the project currently contains the MiSTer template framework and demo core. See `RESOURCES.md` for the hardware references.
 
-It's highly recommended to follow the notes to keep it standardized for easier maintenance and collaboration with other developers.
+The notes below come from the MiSTer template and describe the standard core layout. `<core_name>` is `NeXT-Color`.
 
 ## Source structure
 
