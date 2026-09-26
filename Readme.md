@@ -23,17 +23,30 @@ own 1080p section instead:
    ```ini
    [NeXT-Color]
    video_mode=8      ; 1920x1080@60
+   vscale_mode=3     ; 0.25 steps: 1.25x = 1400x1040
+   vfilter_default=No Interpolation.txt
    ```
 
 3. Load the core again, or reboot the MiSTer. The MiSTer reads the core's
    section each time the core loads.
 
+`vscale_mode=3` lets the scaler use quarter steps, so 832 lines become exactly
+1040 (5/4): every fourth pixel and line is repeated, a regular pattern, and the
+picture fills 96% of the height. `No Interpolation` keeps those edges hard; the
+filter can be changed live in the OSD's video processing menu (for example
+`Upscaling - SharpBilinear/SharpBilinear_050.txt` for more even stroke weight).
+Without the two extra lines, Normal stretches 832 lines to 1080 (1.298x), which
+cannot stay crisp.
+
 Then choose the look in the core's OSD, under **Scale**:
 
 | Scale | Result on 1080p |
 |---|---|
-| Normal | fills the screen height (1454x1080). Slightly soft, because 832 lines stretch to 1080 |
+| Normal | with `vscale_mode=3`: 1400x1040, an exact 1.25x. Without it: 1454x1080, soft |
 | V-Integer | 1:1 pixel-perfect 1120x832, centred with borders. The sharpest text |
+
+If even V-Integer is not razor sharp, the display itself is rescaling the
+1080p signal: set it to "Just Scan", "1:1" or PC mode.
 
 **Aspect ratio** "Original" is 1120:832 (35:26), i.e. square pixels, as on the
 NeXT display.
@@ -41,6 +54,19 @@ NeXT display.
 To undo the change, delete the `[NeXT-Color]` section. Other `video_mode` values
 are listed in the MiSTer.ini that ships with MiSTer (for example `9` is
 1920x1080@50).
+
+## Disks
+
+* OSD **SCSI disk 0 / 1** (`.hda`, `.vhd`, `.img`): SCSI targets 0 and 1. The
+  mount is remembered (`config/NeXT-Color.s0`/`.s1`) and restored at core start.
+  **CD-ROM** (`.iso`, `.cue`/`.bin`, `.chd`) is target 3.
+* Set OSD **Boot device** to "SCSI disk" to boot NeXTSTEP from target 0 (the
+  NVRAM boot command becomes `sd`), or type `b sd` at `NeXT>`.
+* The target responses (INQUIRY, READ CAPACITY, ...) come from the MiSTer's
+  Main program: it must be the `next-color` build of Main_MiSTer (its
+  `is_next()` accepts this core; `scripts/build_main_wsl.sh`). A stock Main
+  finds no disk.
+* Disk images are written to: work on a copy.
 
 The notes below come from the MiSTer template and describe the standard core layout. `<core_name>` is `NeXT-Color`.
 

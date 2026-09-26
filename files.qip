@@ -30,6 +30,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_intc.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_timers.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_bt463.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_kms.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_regfile.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_enet.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_scc.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_esp_mini.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_tdma.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_scsi.sv

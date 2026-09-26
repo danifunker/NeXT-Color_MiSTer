@@ -95,12 +95,41 @@ as "HS §n") and in the Previous r1851 sources under `scratch/resources/`.
   which retries the network forever (HS §16.2), so the sim/hardware default
   image carries a valid checksum and the OSD-selected boot command.
 
+## SCSI and DMA (M4, 2026-09-26)
+
+- **ESP + targets = `rtl/tc_scsi.sv`** (NeXT_MiSTer's next_scsi.sv minus its
+  inline DMA), **PC-chip DMA = `rtl/tc_tdma.sv`** (all seven Turbo channels'
+  registers; only the SCSI channel moves data).  They meet on the 13-signal
+  channel port the unit bench tested.
+- **DMA memory master** in tc_machine's service FSM (quadra800.sv's SONIC
+  pattern): one longword beat per request, alternating with the CPU, through
+  the ordinary RAM port (the bridge drops its retained line on a DMA write and
+  drains posted CPU writes before a DMA read); a DMA write pulses the 68040
+  snoop.  **Only present DRAM** is a DMA target; anything else answers m_err
+  (channel BUSEXC, Previous dma.c:445-449).
+- **hps_io `WIDE=0`, `VDNUM=4`**: tc_scsi keeps next_scsi's 8-bit sd_buff
+  port; the boot-ROM loader pairs the ioctl bytes into big-endian halfwords.
+  OSD `SC0`/`SC1` (disks, remembered in `config/NeXT-Color.s<n>`) and `S3`
+  (CD-ROM, which also carries Main's target-response windows).  Slot 2 has no
+  entry: target 2 times out.  tc_scsi's request goes to slot `sd_unit` only.
+- **No mount replay**: tc_scsi keeps its mount state outside the machine
+  reset (the Quadra's ncr53c96 needed a replay FSM; this engine does not).
+- Main_MiSTer `next-color` (f2d08a5, `is_next()` matches "NeXT-Color") is
+  required on hardware: without it Main answers no INQUIRY / READ CAPACITY
+  windows for this core.  Build: `scripts/build_main_wsl.sh`.
+
 ## Simulation
 
 - Full-machine Verilator sim instantiates the machine and the **real memory
   path** (`sdram_beat32` + `sdram.sv` against the `tb_sdram.sv` chip model; the
   DDR3 VRAM bridge against a DDR3 bus model). `+fastmem` switches RAM/VRAM to
   plain arrays for fast iteration.
+- **SD slots in the sim** (M4): `sim.v` models the HPS side of the block
+  interface; disk images are read/written through DPI (`verilator/host/
+  host_dpi.cpp`, 64-bit offsets), and the target-response windows are served
+  by Main_MiSTer's own `support/next` sources (copied from `../Main_MiSTer`
+  at build time, with NeXT_MiSTer's shim headers), so the sim tests the Main
+  code that ships.
 
 ## Repository and hardware
 

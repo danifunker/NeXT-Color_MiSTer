@@ -39,6 +39,14 @@ build)
         mkdir -p $WSL_DIR
         cd \"\$(wslpath '$WIN_ROOT')\"
         rsync -a --delete --exclude obj_dir --exclude '*.png' --exclude '*.log' rtl verilator releases rom-dissassembly scripts $WSL_DIR/
+        # the HPS side of the SD slots: Main_MiSTer support/next (branch
+        # next-color, ../Main_MiSTer) + the shim headers (verilator/host/shim)
+        MAIN=\"\$(wslpath '$WIN_ROOT')/../Main_MiSTer\"
+        [ -f \"\$MAIN/support/next/next_scsi.cpp\" ] || { echo \"no \$MAIN/support/next\"; exit 1; }
+        mkdir -p $WSL_DIR/host_main/support
+        rsync -a --delete \"\$MAIN/support/next\" $WSL_DIR/host_main/support/
+        rsync -a verilator/host/shim/ $WSL_DIR/host_main/
+        git -C \"\$MAIN\" log --oneline -1 > $WSL_DIR/host_main/MAIN_COMMIT 2>/dev/null || echo unknown > $WSL_DIR/host_main/MAIN_COMMIT
         find $WSL_DIR \( -name '*.sh' -o -name Makefile \) -exec sed -i 's/\r\$//' {} +
         cd $WSL_DIR/verilator
         make -j\$(nproc) 2>&1 | tail -30

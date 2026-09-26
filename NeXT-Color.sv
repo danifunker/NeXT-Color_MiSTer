@@ -55,7 +55,6 @@ assign AUDIO_L = 0;
 assign AUDIO_R = 0;
 assign AUDIO_MIX = 0;
 
-assign LED_DISK = 0;
 assign LED_POWER = 0;
 assign BUTTONS = 0;
 
@@ -64,6 +63,14 @@ assign BUTTONS = 0;
 `include "build_id.v"
 localparam CONF_STR = {
 	"NeXT-Color;;",
+	"-;",
+	// SC slots: Main remembers the mounted image in config/NeXT-Color.s<n>
+	// and re-mounts it at core start, so the ROM can boot from the disk.
+	// Slot n = SCSI target n; slot 3 is the CD-ROM (Main's NEXT_CDROM_SLOT,
+	// which also carries the target-response windows, rtl/tc_scsi.sv).
+	"SC0,HDAVHDIMG,SCSI disk 0;",
+	"SC1,HDAVHDIMG,SCSI disk 1;",
+	"S3,ISOCUEBINCHD,CD-ROM;",
 	"-;",
 	"O[4:3],Memory,64 MB,128 MB,16 MB,32 MB;",
 	"O[5],Power-on self test,On,Off;",
@@ -90,9 +97,26 @@ wire        ioctl_download;
 wire [15:0] ioctl_index;
 wire        ioctl_wr;
 wire [26:0] ioctl_addr;
-wire [15:0] ioctl_dout;
+wire  [7:0] ioctl_dout;
 
-hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
+// SD slots (NeXT_MiSTer NeXT.sv): WIDE=0 because tc_scsi keeps next_scsi's
+// 8-bit sd_buff port; VDNUM 4 = slots 0..3 (slot 2 has no OSD entry, so
+// target 2 always times out, as in the mono core).  tc_scsi talks to one
+// target at a time: its request goes to slot sd_unit and only that slot's
+// acknowledge comes back.
+wire  [3:0] img_mounted_v, sd_ack_v;
+wire        img_readonly;
+wire [63:0] img_size;
+wire  [2:0] sd_unit;
+wire [31:0] sd_lba;
+wire        sd_rd, sd_wr, sd_busy;
+wire [13:0] sd_buff_addr;
+wire  [7:0] sd_buff_dout, sd_buff_din;
+wire        sd_buff_wr;
+wire  [3:0] scsi_onehot = 4'd1 << sd_unit[1:0];
+wire        sd_ack      = (sd_unit < 3'd4) ? sd_ack_v[sd_unit[1:0]] : 1'b0;
+
+hps_io #(.CONF_STR(CONF_STR), .WIDE(0), .VDNUM(4)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(HPS_BUS),
@@ -112,8 +136,23 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
 	.ioctl_wr(ioctl_wr),
 	.ioctl_addr(ioctl_addr),
 	.ioctl_dout(ioctl_dout),
-	.ioctl_wait(1'b0)
+	.ioctl_wait(1'b0),
+
+	.img_mounted(img_mounted_v),
+	.img_readonly(img_readonly),
+	.img_size(img_size),
+	.sd_lba('{sd_lba, sd_lba, sd_lba, sd_lba}),
+	.sd_rd({4{sd_rd}} & scsi_onehot),
+	.sd_wr({4{sd_wr}} & scsi_onehot),
+	.sd_ack(sd_ack_v),
+	.sd_blk_cnt('{6'd0, 6'd0, 6'd0, 6'd0}),
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_din('{sd_buff_din, sd_buff_din, sd_buff_din, sd_buff_din}),
+	.sd_buff_wr(sd_buff_wr)
 );
+
+assign LED_DISK = {1'b0, sd_busy};
 
 ///////////////////////   CLOCKS   ///////////////////////////////
 
@@ -143,9 +182,11 @@ pll_vid pllv
 wire rom_index = (ioctl_index[5:0] <= 6'd1);
 reg  rom_loaded = 0;
 reg  rom_dl_d   = 0;
+reg  [7:0] rom_even = 0;      // the even byte of the halfword being loaded
 always @(posedge clk_sys) begin
 	rom_dl_d <= ioctl_download && rom_index;
 	if (rom_dl_d && !(ioctl_download && rom_index)) rom_loaded <= 1;
+	if (ioctl_wr && !ioctl_addr[0]) rom_even <= ioctl_dout;
 end
 
 
@@ -260,6 +301,20 @@ tc_machine machine
 	.pot_on(pot_on),
 	.boot_cmd(boot_cmd),
 
+	.img_mounted({2'b00, img_mounted_v}),
+	.img_readonly(img_readonly),
+	.img_size(img_size),
+	.sd_unit(sd_unit),
+	.sd_lba(sd_lba),
+	.sd_rd(sd_rd),
+	.sd_wr(sd_wr),
+	.sd_ack(sd_ack),
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_din(sd_buff_din),
+	.sd_buff_wr(sd_buff_wr),
+	.sd_busy(sd_busy),
+
 	.led(led),
 	.reset_req(reset_req),
 
@@ -309,11 +364,12 @@ tc_memsys memsys
 	.mem_line_pending_tag(mem_line_pending_tag),
 
 	// boot.rom is ioctl index 0 (the Main loads games/NeXT-Color/boot.rom at
-	// core start), the OSD "Load boot ROM" entry is index 1.  The ioctl
-	// halfword carries file byte 0 in [7:0]: swap to big-endian.
-	.rom_we(ioctl_download && rom_index && ioctl_wr && ioctl_addr[26:17] == 0),
+	// core start), the OSD "Load boot ROM" entry is index 1.  Byte-wide
+	// ioctl (WIDE=0): the even byte is held and written with the odd one,
+	// big-endian (file byte 0 = bits 15:8 of the first halfword).
+	.rom_we(ioctl_download && rom_index && ioctl_wr && ioctl_addr[0] && ioctl_addr[26:17] == 0),
 	.rom_waddr(ioctl_addr[16:1]),
-	.rom_wdata({ioctl_dout[7:0], ioctl_dout[15:8]}),
+	.rom_wdata({rom_even, ioctl_dout}),
 
 	.hreg(tmc_hreg),
 	.vreg(tmc_vreg),

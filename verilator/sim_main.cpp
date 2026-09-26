@@ -74,6 +74,12 @@ static bool     opt_quiet_calls = false;
 static std::vector<std::pair<uint64_t, std::string>> opt_type;   // --type CYC:text
 static uint64_t opt_trace_pc_from = 0, opt_trace_pc_n = 0;       // --trace-pc FROM,N
 static uint64_t opt_color_bars = 0;                              // --color-bars CYCLE
+static std::string opt_disk[2];                                  // --disk0 / --disk1 images
+
+// host/host_dpi.cpp: the SD slots' disk images and Main's mount hook
+int64_t sim_disk_open(int slot, const char* path);
+extern "C" int host_mount_disk(int slot, long long bytes);
+static int64_t disk_bytes[2] = {0, 0};
 
 // ------------------------------------------------------------------ symbols
 static std::map<uint32_t, std::string> syms;
@@ -299,6 +305,7 @@ static int led_changes = 0, berr_count = 0;
 static bool berr_prev = false;
 static uint8_t state_prev = 0;
 static uint64_t pc_trace_left = 0;
+static bool ran_dram = false;
 
 static void print_regs(const char* why) {
 	printf("[REGS] %s pc=%08X (%s) pc_i=%08X sr=%04X ir=%04X a7=%08X d0=%08X d1=%08X d2=%08X a0=%08X ipl=%u int=%08X @%llu\n",
@@ -333,6 +340,13 @@ static void monitor() {
 				print_regs("stop-at-pc");
 				stop_req = true;
 			}
+		// the ROM jumps into a loaded boot program (HS 9.3: "jsr entry")
+		if (!ran_dram && pc >= 0x04000000 && pc < 0x0C000000) {
+			ran_dram = true;
+			printf("[BOOT] first instruction from DRAM: %08X @%llu (%.3f ms)\n", pc,
+			       (unsigned long long)cyc, cyc / 33000.0);
+			print_regs("boot-entry");
+		}
 		if (pc_trace_left && cyc >= opt_trace_pc_from) {
 			printf("[PC] %08X %s\n", pc, sym_of(pc).c_str());
 			pc_trace_left--;
@@ -389,6 +403,15 @@ static void step_tick() {
 		top->config_reset = cyc < opt_reset_cycles;
 		top->reset        = cyc < opt_reset_cycles || top->reset_req;
 		top->timestamp    = ((uint64_t)1 << 32) | 1790000000u;   // 2026-09-21 UTC, fixed
+		// the mounts, one slot per clock at cycles 100/102, inside the reset
+		// window as the core-start mount is on hardware (tc_scsi keeps its
+		// mount state outside the reset)
+		top->img_mounted = 0;
+		for (int s = 0; s < 2; s++)
+			if (disk_bytes[s] > 0 && cyc == 100 + 2 * (uint64_t)s) {
+				top->img_mounted = 1 << s;
+				top->img_size = (uint64_t)disk_bytes[s];
+			}
 		if (!top->reset) monitor();
 		keyboard_tick();
 #ifdef SIM_GUI
@@ -414,6 +437,8 @@ static void usage() {
 	       "  --pot-on              NVRAM default image with the power-on test on (POT $11)\n"
 	       "  --boot CMD            NVRAM default boot command (default: empty -> prompt)\n"
 	       "  --type CYC:TEXT       type TEXT on the keyboard from cycle CYC ('|' = Return)\n"
+	       "  --disk0 FILE          SCSI target 0 image (SD slot 0; written back: use a copy)\n"
+	       "  --disk1 FILE          SCSI target 1 image (SD slot 1)\n"
 	       "  --color-bars CYC      sim-only: write colour bars into VRAM at cycle CYC\n");
 }
 
@@ -452,6 +477,8 @@ int main(int argc, char** argv) {
 		else if (a == "--ram") opt_ram_cfg = atoi(next()) & 3;
 		else if (a == "--pot-on") opt_pot_on = true;
 		else if (a == "--boot") opt_boot = next();
+		else if (a == "--disk0") opt_disk[0] = next();
+		else if (a == "--disk1") opt_disk[1] = next();
 		else if (a == "--type") {
 			std::string s = next();
 			size_t c = s.find(':');
@@ -486,7 +513,19 @@ int main(int argc, char** argv) {
 	top->ps2_key = 0;
 	top->ps2_mouse = 0;
 	top->vram_poke_en = 0;
+	top->img_mounted = 0;
+	top->img_readonly = 0;
+	top->img_size = 0;
 	top->eval();
+
+	for (int s = 0; s < 2; s++) {
+		if (opt_disk[s].empty()) continue;
+		disk_bytes[s] = sim_disk_open(s, opt_disk[s].c_str());
+		if (disk_bytes[s] <= 0) { printf("[SIM] cannot open disk %d image %s\n", s, opt_disk[s].c_str()); return 1; }
+		host_mount_disk(s, disk_bytes[s]);
+		printf("[SIM] SCSI target %d: %s, %lld bytes (%lld blocks)\n", s, opt_disk[s].c_str(),
+		       (long long)disk_bytes[s], (long long)(disk_bytes[s] / 512));
+	}
 
 	static const char* ram_names[4] = {"64 MB", "128 MB", "16 MB", "32 MB"};
 	printf("[SIM] RAM %s, POT %s, boot command \"%s\"\n", ram_names[opt_ram_cfg],

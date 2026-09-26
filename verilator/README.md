@@ -18,9 +18,10 @@ About 380k clk_sys (33 MHz) cycles per second on this box, so a second of
 machine time is ~90 s. The real ROM reaches `NeXT>` (POST off, empty boot
 command) in about 3 s of machine time.
 
-`+rom=rom_fast.hex` runs a sim-only ROM with the CRC, the 2 MB VRAM test and
-the 750 ms video delay patched out (`scripts/make_fastboot_rom.py`): the
-prompt in ~30M cycles instead of ~110M.
+`+rom=rom_fast.hex` runs a sim-only ROM with the CRC, the 2 MB VRAM test,
+the 750 ms video delay, the 2 s SCSI bus-reset settle and the TEST_DRAM
+memory test patched out (`scripts/make_fastboot_rom.py`): the prompt in ~30M
+cycles instead of ~110M, and a `--pot-on` POST in ~71M.
 
 ## GUI
 
@@ -46,6 +47,27 @@ The same command-line options apply.
 | `--pot-on` | NVRAM default image with the power-on test (POT $11) |
 | `--boot CMD` | NVRAM default boot command (empty = stop at `NeXT>`) |
 | `--type C:TEXT` | type TEXT from cycle C (`\|` = Return) through the PS/2 -> KMS path |
+| `--disk0 F`, `--disk1 F` | SCSI target 0 / 1 image (SD slot 0 / 1); **written back**: use a copy |
+| `+hostlat=N` | the HPS answers an SD request only after N clocks (default at once) |
+
+## SCSI disks
+
+`sim.v` models the HPS side of tc_scsi's SD block interface (the protocol of
+NeXT_MiSTer's `tb/tb_next_boot.sv`).  Disk blocks come from the `--diskN` image
+through DPI (`host/host_dpi.cpp`, 64-bit offsets, so 2 GB images work); the
+target-response windows (INQUIRY, READ CAPACITY, MODE SENSE, ... on slot 3) are
+answered by Main_MiSTer's own `support/next` sources, which `sim_wsl.sh build`
+copies from `../Main_MiSTer` (branch next-color) into `~/NeXT-Color/host_main`
+together with the shim headers in `host/shim` (from NeXT_MiSTer `tb/host`).
+
+```bash
+bash scripts/sim_wsl.sh run +rom=rom_fast.hex --boot sd \
+    --disk0 /home/dani/next_prof/ns33_color.hda --max-cycles 250000000
+```
+
+reaches the kernel (`[BOOT] first instruction from DRAM` marks the jump into
+the loaded boot program; `[SD]` lines log block reads/writes).  With
+`rom_fast.hex` the ROM's 2 s SCSI bus-reset settle is 1 ms.
 
 ## Log lines
 
@@ -57,4 +79,5 @@ A0: 1/2 = CRC, 5 = no DRAM bank, ...); `[VID]` frames; `[HB]` heartbeat.
 
 ## Unit benches
 
-`verilator/unit/`: `bash scripts/sim_wsl.sh unit tc_kms`, `... unit tc_mccs1850`.
+`verilator/unit/`: `bash scripts/sim_wsl.sh unit tc_kms`, `... unit tc_mccs1850`,
+`... unit tc_scsi` (tc_scsi + tc_tdma against the ROM's SCSI driver sequences).

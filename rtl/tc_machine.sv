@@ -90,6 +90,24 @@ module tc_machine
 	input             pot_on,             // NVRAM default: power-on test
 	input      [95:0] boot_cmd,           // NVRAM default: boot command
 
+	// SCSI targets on MiSTer SD slots (tc_scsi: hps_io 8-bit buffer, WIDE=0).
+	// Slots 0, 1 = disks (targets 0, 1), 3 = CD-ROM (target 3, and the
+	// slot Main answers the response-window LBAs on).  One engine: the
+	// request goes to slot sd_unit, and only that slot's ack is fed back.
+	input       [5:0] img_mounted,
+	input             img_readonly,
+	input      [63:0] img_size,
+	output      [2:0] sd_unit,
+	output     [31:0] sd_lba,
+	output            sd_rd,
+	output            sd_wr,
+	input             sd_ack,
+	input      [13:0] sd_buff_addr,
+	input       [7:0] sd_buff_dout,
+	output      [7:0] sd_buff_din,
+	input             sd_buff_wr,
+	output            sd_busy,
+
 	output            led,
 	output            reset_req,          // KMS magic reset: the top resets the machine
 
@@ -250,6 +268,8 @@ reg         walker_berr;
 
 reg         cpu_berr;
 wire  [2:0] ipl;
+reg         snoop_stb;        // a DMA write landed (service FSM below)
+reg  [31:2] snoop_line;
 
 wombat_cpu #(.AP040_FPU_REVISION(8'h41)) cpu (
 	.clk(clk),
@@ -284,8 +304,8 @@ wombat_cpu #(.AP040_FPU_REVISION(8'h41)) cpu (
 	.walker_data(walker_data),
 	.walker_berr(walker_berr),
 
-	.snoop_stb(1'b0),
-	.snoop_addr(32'd0),
+	.snoop_stb(snoop_stb),               // DMA write: drop the D-cache line
+	.snoop_addr({snoop_line, 2'b00}),
 
 	.nresetout(),
 	.nmi_ack_toggle(),
@@ -344,16 +364,31 @@ wire dev_rst = !nreset;
 
 wire        kms_power_key;
 
-// interrupt sources (levels), Previous sysReg.h bit names
+// interrupt sources (levels), Previous sysReg.h bit names (includes/sysReg.h:24-55)
 wire        int_power, int_keymouse, int_timer, int_video, int_tmc_nmi, int_kms_nmi;
+wire        int_scsi, int_scsi_dma, int_snd_out_dma, int_snd_in_dma, int_printer_dma,
+            int_dsp_dma, int_en_tx_dma, int_en_rx_dma, int_en_tx, int_en_rx;
 wire  [1:0] softint;
 wire        timer_ipl7;
 wire [31:0] int_src = {int_tmc_nmi | int_kms_nmi,  // 31 INT_NMI
                        1'b0,                       // 30 INT_PFAIL (parity: none)
                        int_timer,                  // 29 INT_TIMER
-                       15'd0,                      // 28..14
+                       int_en_tx_dma,              // 28 INT_EN_TX_DMA
+                       int_en_rx_dma,              // 27 INT_EN_RX_DMA
+                       int_scsi_dma,               // 26 INT_SCSI_DMA
+                       1'b0,                       // 25 INT_DISK_DMA (MO: none)
+                       int_printer_dma,            // 24 INT_PRINTER_DMA
+                       int_snd_out_dma,            // 23 INT_SND_OUT_DMA
+                       int_snd_in_dma,             // 22 INT_SND_IN_DMA
+                       1'b0,                       // 21 INT_SCC_DMA
+                       int_dsp_dma,                // 20 INT_DSP_DMA
+                       6'd0,                       // 19..14
                        int_video,                  // 13 INT_DISK = TMC video / ADB
-                       8'd0,                       // 12..5 (SCSI 12, floppy 7: later)
+                       int_scsi,                   // 12 INT_SCSI (tc_scsi: ENABLE_INT & STAT_INT)
+                       1'b0,                       // 11 INT_PRINTER
+                       int_en_tx,                  // 10 INT_EN_TX (tc_enet TX status & mask)
+                       int_en_rx,                  // 9 INT_EN_RX (tc_enet RX status & mask)
+                       4'd0,                       // 8..5 (floppy 7: later)
                        1'b0,                       // 4
                        int_keymouse,               // 3 INT_KEYMOUSE
                        int_power,                  // 2 INT_POWER
@@ -425,28 +460,86 @@ tc_kms #(.CLK_HZ(CLK_HZ)) kms (
 	.reset_req(reset_req), .dbg_cmd()
 );
 
-// Stand-ins until the devices are modelled: the PC-chip DMA channel
-// registers (HS 7; TDMA engine: M4) and the AT&T 7213 Ethernet byte
-// registers (HS 8; the $704 path writes $02106006/$02106004, HS 16.1
-// item 15).  The ESP is tc_esp_mini (POST FIFO test, HS 9.5) until the full
-// SCSI model (M4); the SCC is tc_scc (from NeXT_MiSTer next_scc.sv).
+// PC-chip DMA channels (HS 7): rtl/tc_tdma.sv, every channel's registers;
+// the SCSI and Ethernet TX/RX channels move data through the memory master
+// below.
 wire [31:0] dma_rdata, enet_rdata, esp_rdata, scc_rdata;
 wire        dma_ack, enet_ack, esp_ack, scc_ack;
-tc_regfile #(.AW(8)) dma_regs (
+
+wire        dm_req, dm_we;            // tc_tdma memory master (one longword per request)
+wire [31:2] dm_addr;
+wire  [3:0] dm_be;
+wire [31:0] dm_wdata;
+reg         dm_ack, dm_err;
+reg  [31:0] dm_rdata;
+
+wire        ch_req, ch_we, ch_eval, ch_ack, ch_err;   // tc_scsi <-> tc_tdma SCSI channel
+wire [31:0] ch_wdata, ch_rdata;
+wire        ch_enable, ch_dev2m, ch_room, ch_at_limit, ch_bufreset;
+wire  [3:0] ch_bufofs;
+
+wire        et_req, et_ack, et_err, et_enable, et_room, et_done;   // tc_enet <-> Ethernet TX channel
+wire [31:0] et_rdata;
+wire  [2:0] et_n;
+wire        er_req, er_ack, er_err, er_enable, er_room, er_eof, er_full;   // ... RX channel
+wire [31:0] er_wdata;
+wire  [2:0] er_n;
+wire  [3:0] er_nibble;
+
+tc_tdma dma (
 	.clk(clk), .reset(dev_rst),
 	.stb(io_stb && io_dev == D_DMA && !io_tmc), .we(io_we),
-	.addr({io_addr[14], io_addr[8:2]}), .be(io_be), .wdata(io_wdata),
-	.rdata(dma_rdata), .ack(dma_ack));
-tc_regfile #(.AW(2)) enet_regs (
-	.clk(clk), .reset(dev_rst),
-	.stb(io_stb && io_dev == D_ENET && !io_tmc), .we(io_we),
-	.addr(io_addr[3:2]), .be(io_be), .wdata(io_wdata),
-	.rdata(enet_rdata), .ack(enet_ack));
-tc_esp_mini esp (
+	.addr(io_addr[16:2]), .be(io_be), .wdata(io_wdata),
+	.rdata(dma_rdata), .ack(dma_ack),
+	.m_req(dm_req), .m_we(dm_we), .m_addr(dm_addr), .m_be(dm_be), .m_wdata(dm_wdata),
+	.m_ack(dm_ack), .m_rdata(dm_rdata), .m_err(dm_err),
+	.sc_req(ch_req), .sc_we(ch_we), .sc_wdata(ch_wdata), .sc_eval(ch_eval),
+	.sc_ack(ch_ack), .sc_rdata(ch_rdata), .sc_err(ch_err),
+	.sc_enable(ch_enable), .sc_dev2m(ch_dev2m), .sc_room(ch_room), .sc_at_limit(ch_at_limit),
+	.sc_bufreset(ch_bufreset), .sc_bufofs(ch_bufofs),
+	.et_req(et_req), .et_ack(et_ack), .et_rdata(et_rdata), .et_n(et_n), .et_err(et_err),
+	.et_enable(et_enable), .et_room(et_room), .et_done(et_done),
+	.er_req(er_req), .er_wdata(er_wdata), .er_n(er_n), .er_ack(er_ack), .er_err(er_err),
+	.er_enable(er_enable), .er_room(er_room), .er_eof(er_eof), .er_full(er_full),
+	.er_nibble(er_nibble),
+	.int_scsi_dma(int_scsi_dma), .int_snd_out_dma(int_snd_out_dma),
+	.int_snd_in_dma(int_snd_in_dma), .int_printer_dma(int_printer_dma),
+	.int_dsp_dma(int_dsp_dma), .int_en_tx_dma(int_en_tx_dma), .int_en_rx_dma(int_en_rx_dma)
+);
+
+// NCR 53C90 + SCSI DMA control + targets on the SD slots (HS 9):
+// rtl/tc_scsi.sv.  The floppy's share of the channel is tied off inside.
+tc_scsi #(.CLK_HZ(CLK_HZ)) esp (
 	.clk(clk), .reset(dev_rst),
 	.stb(io_stb && io_dev == D_ESP && !io_tmc), .we(io_we),
 	.addr(io_addr[5:2]), .be(io_be), .wdata(io_wdata),
-	.rdata(esp_rdata), .ack(esp_ack));
+	.rdata(esp_rdata), .ack(esp_ack),
+	.ch_req(ch_req), .ch_we(ch_we), .ch_wdata(ch_wdata), .ch_eval(ch_eval),
+	.ch_ack(ch_ack), .ch_rdata(ch_rdata), .ch_err(ch_err),
+	.ch_enable(ch_enable), .ch_dev2m(ch_dev2m), .ch_room(ch_room), .ch_at_limit(ch_at_limit),
+	.ch_bufreset(ch_bufreset), .ch_bufofs(ch_bufofs),
+	.int_scsi(int_scsi),
+	.img_mounted(img_mounted), .img_readonly(img_readonly), .img_size(img_size),
+	.sd_unit(sd_unit), .sd_lba(sd_lba), .sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack_in(sd_ack),
+	.sd_buff_addr(sd_buff_addr), .sd_buff_dout(sd_buff_dout), .sd_buff_din(sd_buff_din),
+	.sd_buff_wr(sd_buff_wr), .sd_busy(sd_busy), .sd_hold(1'b0), .cd_fwd_stb()
+);
+
+// AT&T 7213 Ethernet (HS 8): rtl/tc_enet.sv, internal loopback for the
+// POST; no network attachment yet.  Its data moves through tc_tdma's
+// Ethernet TX/RX channels.
+tc_enet enet (
+	.clk(clk), .reset(dev_rst),
+	.stb(io_stb && io_dev == D_ENET && !io_tmc), .we(io_we),
+	.addr(io_addr[3:2]), .be(io_be), .wdata(io_wdata),
+	.rdata(enet_rdata), .ack(enet_ack),
+	.et_req(et_req), .et_ack(et_ack), .et_rdata(et_rdata), .et_n(et_n), .et_err(et_err),
+	.et_enable(et_enable), .et_room(et_room), .et_done(et_done),
+	.er_req(er_req), .er_wdata(er_wdata), .er_n(er_n), .er_ack(er_ack), .er_err(er_err),
+	.er_enable(er_enable), .er_room(er_room), .er_eof(er_eof), .er_full(er_full),
+	.er_nibble(er_nibble),
+	.int_en_tx(int_en_tx), .int_en_rx(int_en_rx)
+);
 tc_scc scc (
 	.clk(clk), .reset(dev_rst),
 	.stb(io_stb && io_dev == D_SCC && !io_tmc), .we(io_we),
@@ -481,7 +574,18 @@ localparam S_IDLE = 3'd0, S_MEM = 3'd1, S_IO = 3'd2, S_BERR = 3'd3, S_OPEN = 3'd
 reg  [2:0] svc;
 reg        svc_walker;
 reg        svc_bus_direct;
+reg        svc_dma;           // the beat in S_MEM is tc_tdma's
 reg [31:2] svc_addr;
+
+// The PC chip's DMA is the machine's other bus master (quadra800.sv's SONIC
+// pattern): one longword beat per request, alternating with the CPU's so
+// neither starves, through the ordinary RAM port -- so sdram_beat32 drops
+// its retained line on a DMA write exactly as on a CPU write, and a DMA read
+// sees every posted CPU write (the bridge drains its FIFO before a read).
+// A DMA write pulses the 68040's snoop, which drops the D-cache's copy of
+// the line.  Only present DRAM is a DMA target; anything else answers
+// m_err, which stops the channel with BUSEXC (Previous dma.c:445-449).
+reg        dma_turn;          // the CPU had the last beat
 
 wire       walker_pend = walker_req && walker_armed;
 reg        walker_armed;
@@ -550,6 +654,7 @@ end
 
 wire cpu_want = walker_pend || bus_first_miss || bus_wr_direct ||
                 (b_req && !b_ack && !cpu_berr && !line_cpu_wait);
+wire dma_take = dm_req && !dm_ack && !dm_err && !walker_pend && (dma_turn || !cpu_want);
 
 assign dbg_berr      = (svc == S_BERR);
 assign dbg_berr_addr = {svc_addr, 2'b00};
@@ -559,7 +664,14 @@ always @(posedge clk) begin
 		svc            <= S_IDLE;
 		svc_walker     <= 0;
 		svc_bus_direct <= 0;
+		svc_dma        <= 0;
 		svc_addr       <= 0;
+		dma_turn       <= 0;
+		dm_ack         <= 0;
+		dm_err         <= 0;
+		dm_rdata       <= 0;
+		snoop_stb      <= 0;
+		snoop_line     <= 0;
 		walker_armed   <= 1;
 		walker_ack     <= 0;
 		walker_data    <= 0;
@@ -599,6 +711,9 @@ always @(posedge clk) begin
 		mem_wp_valid <= 0;
 		cpu_berr     <= 0;
 		io_stb       <= 0;
+		dm_ack       <= 0;
+		dm_err       <= 0;
+		snoop_stb    <= 0;
 		if (wr_split_pend) begin
 			wr_split_pend  <= 0;
 			mem_wp_valid   <= 1;
@@ -612,11 +727,32 @@ always @(posedge clk) begin
 
 		case (svc)
 		S_IDLE: begin
-			if (cpu_want) begin
+			// walker first (it only runs mid-translation); a DMA beat takes
+			// the turn after each CPU beat, or an idle bus
+			if (dma_take) begin
+				svc_walker     <= 0;
+				svc_bus_direct <= 0;
+				dma_turn       <= 0;
+				svc_addr       <= dm_addr;
+				snoop_line     <= dm_addr;
+				if (ram_present(dm_addr)) begin
+					svc_dma    <= 1;
+					mem_req    <= 1;
+					mem_write  <= dm_we;
+					mem_addr   <= ram_sdram(dm_addr);
+					mem_be     <= dm_be;
+					mem_wdata  <= dm_wdata;
+					mem_memsel <= MSEL_RAM;
+					svc        <= S_MEM;
+				end
+				else dm_err <= 1;            // not DRAM: the channel takes BUSEXC
+			end
+			else if (cpu_want) begin
 				reg [31:2] a;
 				reg        wr;
 				reg  [3:0] be;
 				reg [31:0] wd;
+				dma_turn <= 1;
 				if (bus_first_miss) begin
 					svc_walker     <= 0;
 					svc_bus_direct <= 1;
@@ -720,7 +856,13 @@ always @(posedge clk) begin
 		end
 		S_MEM: if (mem_ack) begin
 			mem_req <= 0;
-			if (svc_walker) begin
+			if (svc_dma) begin
+				dm_ack    <= 1;
+				dm_rdata  <= mem_rdata;
+				snoop_stb <= mem_write;
+				svc_dma   <= 0;
+			end
+			else if (svc_walker) begin
 				walker_ack  <= 1;
 				walker_data <= mem_rdata;
 			end

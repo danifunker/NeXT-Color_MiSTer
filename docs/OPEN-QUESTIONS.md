@@ -109,5 +109,30 @@ and what would settle it. "HS n" = `rom-dissassembly/hardware-summary.md` sectio
 31. Selection timeout follows Previous's 20 MHz formula (~314 ms per try, 3 tries
     per absent target): a boot disk that is not target 0 costs ~1 s per absent
     lower target.
-32. Only the SCSI channel moves data; network boot needs the Ethernet RX/TX
-    engines and the saved limit ($02004050 reads 0 today).
+32. Only the SCSI and Ethernet TX/RX channels move data (the Ethernet ones
+    since the T7213 model); sound out/in, printer and DSP are registers only.
+33. **DMA targets DRAM only** (tc_machine): a channel pointed at VRAM, ROM or
+    I/O gets m_err -> COMPLETE|BUSEXC.  Previous DMAs to any memory bank.
+    Nothing in the ROM does it; NeXTSTEP might (e.g. a DMA into the frame
+    buffer).  Settle: log BUSEXC once the OS runs.
+34. **Snoop on DMA writes only.**  A DMA read of a line the 68040 holds dirty
+    in a copyback D-cache returns the memory copy (the real 68040 would
+    intervene).  The ROM runs write-through; NeXTSTEP is expected to push
+    caches before DMA (as the mono core relies on).
+
+## Ethernet (rtl/tc_enet.sv, Ethernet channels of rtl/tc_tdma.sv)
+
+35. **Frames land at offset 0** of the receive buffer (Previous dma.c:839-843).
+    hardware-summary 8.1/16.3 says the real Turbo chip deposits them one byte
+    late, and the ROM's enet_read handles both.  NeXTSTEP's Turbo driver runs
+    on Previous with offset 0.  Settle: a real Turbo, or the driver sources.
+36. **No RX status bus error.**  Previous bus-errors a read of `$02006002`
+    when neither TPE nor LOOP is set and no thin-wire cable is connected
+    (new_enet_buserror, ethernet.c:615-626); tc_enet always answers.
+37. **No network attachment**: outside loopback every frame ends in 16
+    collisions (Previous "disconnected"), and BADTPE reads 1 whenever TPE is
+    selected.  Network boot and NeXTSTEP networking need an HPS bridge (the
+    mono core's Main next_enet) -- not started.
+38. **CRC bytes are zeros**: an accepted frame is stored 4 bytes longer
+    (Previous len += 4), padded to 64; Previous leaves stale buffer bytes
+    there, a real chip the FCS.

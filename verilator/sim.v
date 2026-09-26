@@ -29,6 +29,12 @@ module emu
 	input  [24:0] ps2_mouse,
 	input  [32:0] timestamp,
 
+	// SD slot mounts (sim_main.cpp pulses one bit per opened image)
+	input   [5:0] img_mounted,
+	input         img_readonly,
+	input  [63:0] img_size,
+	output        sd_busy,
+
 	output  [7:0] VGA_R,
 	output  [7:0] VGA_G,
 	output  [7:0] VGA_B,
@@ -100,6 +106,15 @@ wire        vbl_pulse;
 wire [255:0] debug_status;
 wire [127:0] debug_status2;
 
+wire  [2:0] sd_unit;
+wire [31:0] sd_lba;
+wire        sd_rd, sd_wr;
+reg         sd_ack = 0;
+reg  [13:0] sd_buff_addr = 0;
+reg   [7:0] sd_buff_dout = 0;
+wire  [7:0] sd_buff_din;
+reg         sd_buff_wr = 0;
+
 tc_machine machine
 (
 	.clk(clk_sys),
@@ -140,6 +155,20 @@ tc_machine machine
 	.timestamp(timestamp),
 	.pot_on(pot_on),
 	.boot_cmd(boot_cmd),
+
+	.img_mounted(img_mounted),
+	.img_readonly(img_readonly),
+	.img_size(img_size),
+	.sd_unit(sd_unit),
+	.sd_lba(sd_lba),
+	.sd_rd(sd_rd),
+	.sd_wr(sd_wr),
+	.sd_ack(sd_ack),
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_din(sd_buff_din),
+	.sd_buff_wr(sd_buff_wr),
+	.sd_busy(sd_busy),
 
 	.led(led),
 	.reset_req(reset_req),
@@ -294,6 +323,101 @@ ddr3_model ddr
 	.poke_addr(vram_poke_addr),
 	.poke_data(vram_poke_data)
 );
+
+// ---------------------------------------------------------------- SD slots
+// The HPS side of tc_scsi's block interface (NeXT_MiSTer
+// tb/tb_next_boot.sv's SD model, one byte per two clocks): disk blocks
+// from the images sim_main.cpp opened (--disk0/--disk1), and the
+// target-response / command windows (lba >= $7C000000, slot 3) from
+// Main_MiSTer's own support/next code, both through host/host_dpi.cpp.
+// The final sd_buff_wr of a read lands after sd_ack has dropped, as
+// hps_io does it (tc_scsi's sd_read_owned covers that).
+import "DPI-C" function int  host_fill(input int slot, input int lba, input int sz);
+import "DPI-C" function int  host_byte(input int i);
+import "DPI-C" function void host_put(input int i, input int b);
+import "DPI-C" function void host_exec(input int slot, input int lba, input int sz);
+import "DPI-C" function int  disk_read(input int slot, input int lba);
+import "DPI-C" function int  disk_byte(input int i);
+import "DPI-C" function void disk_put(input int i, input int b);
+import "DPI-C" function void disk_write(input int slot, input int lba);
+
+localparam [31:0] WIN_BASE = 32'h7C00_0000;
+
+reg         sd_rd_act = 0, sd_wr_act = 0, sd_rphase = 0, sd_win = 0;
+reg   [2:0] sd_slot = 0;
+reg  [31:0] sd_blk = 0;
+integer     sd_hr, sd_reads = 0, sd_writes = 0;
+// +hostlat=<clocks>: Main answers a request only after this many clocks
+// (its poll cadence on hardware is about a millisecond; default: at once)
+integer     hostlat = 0, hl_cnt = 0;
+initial if ($value$plusargs("hostlat=%d", hostlat)) ;
+wire        sd_idle = !sd_ack && !sd_rd_act && !sd_wr_act;
+wire        hl_ok   = (hl_cnt >= hostlat);
+always @(posedge clk_sys) begin
+	if (sd_idle && (sd_rd || sd_wr)) begin
+		if (hl_cnt < hostlat) hl_cnt <= hl_cnt + 1;
+	end
+	else hl_cnt <= 0;
+end
+
+always @(posedge clk_sys) begin
+	sd_buff_wr <= 0;
+	if (sd_idle && sd_rd && hl_ok) begin
+		sd_ack       <= 1;
+		sd_rd_act    <= 1;
+		sd_buff_addr <= 0;
+		sd_win       <= (sd_lba >= WIN_BASE);
+		if (sd_lba >= WIN_BASE)
+			sd_hr = host_fill({29'd0, sd_unit}, sd_lba, 512);
+		else begin
+			sd_hr = disk_read({29'd0, sd_unit}, sd_lba);
+			sd_reads = sd_reads + 1;
+			if (sd_reads <= 64 || (sd_reads % 1024) == 0)
+				$display("[SD] read slot %0d lba %0d (#%0d)%s", sd_unit, sd_lba, sd_reads,
+				         (sd_hr != 0) ? "" : " -- no image");
+		end
+	end
+	else if (sd_ack && sd_rd_act) begin
+		if (!sd_buff_wr) begin
+			sd_buff_dout <= sd_win ? host_byte({18'd0, sd_buff_addr}) : disk_byte({18'd0, sd_buff_addr});
+			sd_buff_wr   <= 1;
+			if (sd_buff_addr == 14'd511) begin
+				sd_ack    <= 0;
+				sd_rd_act <= 0;
+			end
+		end
+		else if (sd_buff_addr != 14'd511) sd_buff_addr <= sd_buff_addr + 1'd1;
+	end
+	else if (sd_idle && sd_wr && hl_ok) begin
+		sd_ack       <= 1;
+		sd_wr_act    <= 1;
+		sd_buff_addr <= 0;
+		sd_rphase    <= 0;
+		sd_win       <= (sd_lba >= WIN_BASE);
+		sd_slot      <= sd_unit;
+		sd_blk       <= sd_lba;
+	end
+	else if (sd_ack && sd_wr_act) begin
+		if (sd_rphase) begin
+			if (sd_win) host_put({18'd0, sd_buff_addr}, {24'd0, sd_buff_din});
+			else        disk_put({18'd0, sd_buff_addr}, {24'd0, sd_buff_din});
+			sd_rphase <= 0;
+			if (sd_buff_addr == 14'd511) begin
+				sd_ack    <= 0;
+				sd_wr_act <= 0;
+				if (sd_win) host_exec({29'd0, sd_slot}, sd_blk, 512);
+				else begin
+					disk_write({29'd0, sd_slot}, sd_blk);
+					sd_writes = sd_writes + 1;
+					if (sd_writes <= 64 || (sd_writes % 1024) == 0)
+						$display("[SD] write slot %0d lba %0d (#%0d)", sd_slot, sd_blk, sd_writes);
+				end
+			end
+			else sd_buff_addr <= sd_buff_addr + 1'd1;
+		end
+		else sd_rphase <= 1;
+	end
+end
 
 // ---------------------------------------------------------------- ROM
 reg [8*256-1:0] romfile;

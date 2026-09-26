@@ -25,6 +25,13 @@ PATCHES = [
     (0x01003AFA, "0caa00000139", "600000d84e71", "skip the 2 MB VRAM pattern test"),
     # $0100AD02 vid_console_init: delay_us(750000) before video enable -> 1000 us
     (0x0100AD02, "2f3c000b71b0", "2f3c000003e8", "750 ms video-enable delay -> 1 ms"),
+    # $0100DB66 scsi_init: delay_us(2000000) after the SCSI bus reset
+    # command (HS 9.2 step 8) -> 1000 us; the sim's targets answer at once
+    (0x0100DB66, "2f3c001e8480", "2f3c000003e8", "2 s SCSI bus-reset settle -> 1 ms"),
+    # $010012EA mon_init: the TEST_DRAM (POT $10) branch around
+    # mem_test_all_t -> always taken (beq.b -> bra.b loc_01001320), so a
+    # --pot-on run gets to the POST proper instead of testing 64 MB
+    (0x010012EA, "6734", "6034", "skip the TEST_DRAM main memory test"),
 ]
 
 def main():

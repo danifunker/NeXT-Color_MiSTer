@@ -25,7 +25,20 @@ V_DEFINE += -Wno-fatal -Wno-WIDTH -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-IMPLICIT
 V_DEFINE += --timing
 V_OPT = --x-assign fast --x-initial fast --noassert -O3
 
-CXXFLAGS_SIM = -O2 -g -I../sim
+# The HPS side of the SD slots (host/host_dpi.cpp) runs Main_MiSTer's own
+# support/next sources, copied with the shim headers (host/shim) into
+# HOST_MAIN by scripts/sim_wsl.sh build (from ../Main_MiSTer, branch next-color).
+HOST_MAIN ?= $(abspath ../host_main)
+HOST_SRC = host/host_dpi.cpp \
+	$(addprefix $(HOST_MAIN)/support/next/,next_scsi.cpp next_cdrom.cpp next_cdrom_resp.cpp \
+		next_cdrom_play.cpp next_mo.cpp next_rs.cpp)
+ifneq ($(MAKECMDGOALS),clean)
+ifeq ($(wildcard $(HOST_MAIN)/support/next/next_scsi.cpp),)
+$(error $(HOST_MAIN) has no Main_MiSTer support/next copy: run scripts/sim_wsl.sh build)
+endif
+endif
+
+CXXFLAGS_SIM = -O2 -g -I../sim -I$(HOST_MAIN)
 
 EXE  = ./obj_dir/Vemu
 VOUT = obj_dir/Vemu.cpp
@@ -48,9 +61,10 @@ V_SRC = \
 	$(RTL)/tc_timers.sv \
 	$(RTL)/tc_bt463.sv \
 	$(RTL)/tc_kms.sv \
-	$(RTL)/tc_regfile.sv \
+	$(RTL)/tc_enet.sv \
 	$(RTL)/tc_scc.sv \
-	$(RTL)/tc_esp_mini.sv \
+	$(RTL)/tc_tdma.sv \
+	$(RTL)/tc_scsi.sv \
 	$(RTL)/wombat_cpu.sv \
 	$(RTL)/wombat_store_buffer.sv \
 	$(RTL)/wombat_bus32.sv \
@@ -67,7 +81,7 @@ V_SRC = \
 	$(AP)/ap040_fpu.v \
 	$(APX)/ap040_pipeline_integer.sv
 
-C_SRC = sim_main.cpp
+C_SRC = sim_main.cpp $(HOST_SRC)
 
 all: $(EXE) rom.hex rom_fast.hex rom_syms.txt
 
@@ -97,7 +111,7 @@ GUI_SRC = sim/sim_console.cpp sim/sim_video.cpp sim/sim_input.cpp \
 	sim/imgui/imgui_impl_sdl.cpp sim/imgui/imgui_impl_opengl2.cpp \
 	sim/imgui/imgui_draw.cpp sim/imgui/imgui_widgets.cpp \
 	sim/imgui/imgui_tables.cpp sim/imgui/imgui.cpp
-GUI_CFLAGS = -O2 -g -I../sim -I../sim/imgui -DSIM_GUI `sdl2-config --cflags`
+GUI_CFLAGS = -O2 -g -I../sim -I../sim/imgui -I$(HOST_MAIN) -DSIM_GUI `sdl2-config --cflags`
 GUI_LIBS = -lGL -ldl `sdl2-config --libs`
 
 gui: rom.hex rom_fast.hex rom_syms.txt

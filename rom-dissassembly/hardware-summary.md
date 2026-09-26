@@ -577,7 +577,7 @@ probes `mon_probe_read_byte/write_byte` (15 attempts), except the two writes in 
 | # | routine | register writes |
 |---|---|---|
 | 1 | `exc_dispatch` $704 ($01001aXX) | `$02106006 = $80` (reset); `$02106004 &= ~$04` |
-| 2 | `enet_init` sub_01008e5e (boot from "en", or POST) | `$02106006 = $80`; `$02106001 = 0`; `$02106000 = $FF`; `$02106004 = 0`; `$02106004 \|= $04` (TPE), `delay_us(500000)`, `mg+$F0 = "en"`; `$02106003 = 0`; `$02106002 = $FF`; `$02106005 = $80`; MAC -> `$02106008..$0210600D` (ROM header `$01000008` unless its bytes 3..5 are FF FF FF, then NVRAM bytes 4..9); RX DMA: `CSR $02000150 = $00940000`, `Next $02004150 = rxbuf0`, `Limit $02004154 = rxbuf0 + $630`, **`$0200411C = rxbuf0`** (TX-channel Stop register per the Previous map; purpose unknown, flagged uncertain — the core should accept the write harmlessly); `enet_rx_dma_start(1)`; `mask \|= $08000000`; `vbr[$78] = sub_01009102`; `sr = $2500` if IPL < 5. **On Turbo `$02106006` is left at `$80`** (non-Turbo writes 0 afterwards); bit 7 must therefore not hold the Turbo chip in reset. |
+| 2 | `enet_init` sub_01008e5e (boot from "en", or POST) | `$02106006 = $80`; `$02106001 = 0`; `$02106000 = $FF`; `$02106004 = 0`; `$02106004 \|= $04` (TPE), `delay_us(500000)`, `mg+$F0 = "en"`; `$02106003 = 0`; `$02106002 = $FF`; `$02106005 = $80`; MAC -> `$02106008..$0210600D` (ROM header `$01000008` unless its bytes 3..5 are FF FF FF, then NVRAM bytes 4..9); RX DMA: `CSR $02000150 = $00940000`, `Next $02004150 = rxbuf0`, `Limit $02004154 = rxbuf0 + $630`, **`$0200411C = rxbuf0`** (TX-channel Stop register per the Previous map; purpose unknown, flagged uncertain — the core should accept the write harmlessly); `enet_rx_dma_start(1)`; `mask \|= $08000000`; `vbr[$78] = sub_01009102`; `sr = $2500` if IPL < 5. **Correction (2026-09-26, from the listing):** `$02106006 = $80` at $01008F06 is followed at once by `clr.b $6(a5)` at $01008F16 when `mg+$194 != $139`, i.e. **on the Turbo the reset is released immediately**; only the `$139` machines keep `$80` until $010090DC. (An earlier version of this table said the Turbo leaves `$80`; it does not.) Bit 7 = 1 holds the chip in reset, as in Previous (`EN_Reset_Write`, `Ethernet_IO_Handler`). |
 | 3 | `enet_rx_dma_start` sub_010096be | `$02106002 = $FF`; `Next = buf`, `Limit = buf + $630`, `$0200411C = buf`; `Start = next buf`, `Stop = next buf + $630`; `CSR = $000F0000` / `$00070000` / `$000E0000`; `$02106005 = $82`; reads `CSR`: bits 27:24 all 0 -> "i3", bit 24 clear -> "X" flag |
 | 4 | `enet_rx_int` sub_010095f0 (vector `$78`) | reads `CSR` (bits 27:24 must be non-zero), `$02106002`, saved limit `$02004050`; `$02106002 = $FF`; `enet_rx_dma_start(0)` |
 | 5 | `enet_read` sub_01009116 | reads `$02106002`; if PKT_OK: `$02106002 = $FF`, `$02106005 = rxmode \| $80`; frame length = `(saved limit & $3FFFFFFF) - buffer`; **if bytes 1..6 of the buffer equal our MAC or broadcast the frame is shifted down one byte** (the Turbo chip deposits the frame one byte late) |
@@ -953,7 +953,8 @@ Ethernet register model of section 8 with RX DMA ring, saved limit `$02004050`, 
 compensation will corrupt frames whose first byte is not our MAC: the ROM shifts only when
 bytes 1..6 match our MAC or broadcast, so a core that deposits frames at offset 0 works as long
 as byte 0 of a frame never equals the first MAC byte — safer to deposit at offset 1 like the
-real chip / Previous).
+real chip).  **Note (2026-09-26):** Previous r1851 deposits at offset 0 (dma.c:839-843, no Turbo
+case), and `rtl/tc_enet.sv` follows it; `enet_read` then takes the frame unshifted.
 
 ---
 
@@ -967,7 +968,7 @@ real chip / Previous).
 | SCR2 bit 12 gating the timing write "meaning not established" (`01000000.md`) | | Same bit as `btst #4,$0200D002` = the 1120x832/832x624 selector (`0100a000.md`, `0100c000.md`) |
 | TMC control bit 3 (`&= ~8` when non-parity SIMMs) and `$02200004` role | flagged uncertain in `01002000.md` | still an interpretation; Previous does not model either. Core: bit 3 r/w, `$02200004` write-ignore/read-0 |
 | `$0200411C = rxbuf` in `enet_init` / `enet_rx_dma_start` | `01008000.md` flags as unknown (TX stop register in the Previous map) | unresolved; accept the write |
-| Ethernet control `$02106006` left at `$80` on Turbo | `01008000.md` | the Turbo chip must run with bit 7 set (Previous only treats it as reset on the non-Turbo path) |
+| Ethernet control `$02106006` left at `$80` on Turbo | `01008000.md` | **wrong** (2026-09-26): enet_init clears it right after on the Turbo ($01008F0C..F16, `mg+$194 != $139`); only the `$139` machines keep `$80` until $010090DC (see 8.1). Previous holds the chip in reset while bit 7 is set on both paths (`Ethernet_IO_Handler`). |
 | ESP clock 25 MHz assumption (CCF 5, timeout `$99`) | `0100c000.md`; Previous uses 20 MHz | the values are written regardless; only affects the real select timeout |
 | Bt463 CR0/CR1/CR2 = `$40/$00/$80` meaning | unverified (`0100a000.md`) | store and ignore |
 | Sound-in DMA CSR `$020000C0` | `01004000.md`; Previous sound-in channel is `$02000080` | unreferenced routine; ignore |
