@@ -1,5 +1,16 @@
+// pll_vid.v -- dedicated pixel-clock PLL for the Turbo Color scan-out.
+//
+// 100 MHz = the Bt463 pixel rate implied by the TMC timing registers, which
+// count 4-pixel units at 25 MHz (SCR2 byte 2 bit 4, "video mode 25 MHz" in
+// Previous sysReg.c:210; hardware-summary section 2.5).  The reset timing
+// ($31048118 / $10430340, 1632 x 896 total) then refreshes at 68.4 Hz, the
+// real monitor's rate.  A separate PLL because the main one must keep
+// clk_ram at exactly 3x clk_sys (33/99 MHz), and no single VCO also gives
+// 100 MHz.  Same frequency-string altera_pll form as rtl/pll/pll_0002.v
+// (copied from MacQuadra800_MiSTer); NeXT-Color.sdc puts it in its own
+// asynchronous clock group.
 `timescale 1ns/10ps
-module  pll_0002(
+module  pll_vid(
 
 	// interface 'refclk'
 	input wire refclk,
@@ -10,11 +21,6 @@ module  pll_0002(
 	// interface 'outclk0'
 	output wire outclk_0,
 
-	// interface 'outclk1' — SDRAM controller domain, 3x the machine clock.
-	// The controller derives SDRAM_CLK itself with an altddio_out (180 deg
-	// from this), so no separate phase-shifted output is needed.
-	output wire outclk_1,
-
 	// interface 'locked'
 	output wire locked
 );
@@ -23,11 +29,11 @@ module  pll_0002(
 		.fractional_vco_multiplier("false"),
 		.reference_clock_frequency("50.0 MHz"),
 		.operation_mode("direct"),
-		.number_of_clocks(2),
-		.output_clock_frequency0("33.000000 MHz"),
+		.number_of_clocks(1),
+		.output_clock_frequency0("100.000000 MHz"),
 		.phase_shift0("0 ps"),
 		.duty_cycle0(50),
-		.output_clock_frequency1("99.000000 MHz"),
+		.output_clock_frequency1("0 MHz"),
 		.phase_shift1("0 ps"),
 		.duty_cycle1(50),
 		.output_clock_frequency2("0 MHz"),
@@ -82,7 +88,7 @@ module  pll_0002(
 		.pll_subtype("General")
 	) altera_pll_i (
 		.rst	(rst),
-		.outclk	({outclk_1, outclk_0}),
+		.outclk	(outclk_0),
 		.locked	(locked),
 		.fboutclk	( ),
 		.fbclk	(1'b0),

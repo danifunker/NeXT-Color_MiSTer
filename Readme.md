@@ -1,7 +1,12 @@
 # NeXT-Color core for MiSTer
 
 ## General description
-A NeXTstation Turbo Color (33 MHz 68040, Turbo chipset, 12-bit color, 1120x832) core for MiSTer. Work in progress: the project currently contains the MiSTer template framework and demo core. See `RESOURCES.md` for the hardware references.
+A NeXTstation Turbo Color (33 MHz 68040, Turbo chipset, 12-bit color, 1120x832) core for MiSTer. Work in progress.
+
+* Boot ROM: Rev 3.3 v74, `releases/boot.rom` -> `games/NeXT-Color/boot.rom` on the MiSTer.
+* Build: `bash scripts/build_only.sh` (Git bash; `--check` = Analysis & Synthesis only). Machine settings in `scripts/local.env` (from `local.env.sample`).
+* Design decisions: `docs/DECISIONS.md`. Hand-off state: the newest `RESUME-*.md`.
+* ROM analysis (the RTL spec): `rom-dissassembly/hardware-summary.md`. Hardware references: `RESOURCES.md`.
 
 The notes below come from the MiSTer template and describe the standard core layout. `<core_name>` is `NeXT-Color`.
 

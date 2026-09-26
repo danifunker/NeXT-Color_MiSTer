@@ -1,23 +1,8 @@
 # verilator build outputs
-SingleStepTests/*/obj_dir/
-# preboot / macos_bench build dirs (each also has a local .gitignore)
-SingleStepTests/preboot/*/build/
-SingleStepTests/macos_bench/build/
-# corpus generator binaries
-SingleStepTests/gen/gen
-SingleStepTests/gen/gen_fpu
 *.o
 *.elf
 
-# raw working disk images (the committed copies are the compressed
-# bundles in SingleStepTests/prebuilt/*.tgz — these are regenerable via
-# the build_<bench>_<hda|dsk>.sh scripts)
-SingleStepTests/preboot/supervisor_bench/dist/*.hda
-SingleStepTests/preboot/supervisor_bench/dist/*.dsk
 verilator/cpu_trace.log
-verilator/quadra800.rom.hex
-verilator/quadra800-fastboot.rom.hex
-verilator/.fastboot.tmp.rom
 imgui.ini
 db
 greybox_tmp
@@ -78,8 +63,6 @@ scripts/local.env
 *.zip
 *.stp
 quartus_build*.log
-MacLC_baseline_pre_fw.rbf
-verilator/asc_sim.log
 verilator/sim_stdout.log
 
 # python tooling artifacts
@@ -89,6 +72,11 @@ __pycache__/
 # Claude Code local permissions (machine-specific: deploy target lives in scripts/local.env)
 .claude/settings.local.json
 verilator/obj_dir_*/
-scripts/guest/*.png
-verilator/sim/mac/
-verilator/run.hda
+
+# NeXT-Color simulator artefacts
+verilator/*.rom.hex
+verilator/*.nvram.hex
+verilator/sim_run*.log
+verilator/*.fst
+verilator/*.vcd
+verilator/screenshot_*.png

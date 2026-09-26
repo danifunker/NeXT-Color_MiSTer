@@ -1,5 +1,7 @@
-set_global_assignment -name VERILOG_FILE rtl/lfsr.v
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/cos.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/mycore.v
+# NeXT-Color RTL file list.  Every RTL file goes here (the .qsf sources this).
 set_global_assignment -name SDC_FILE NeXT-Color.sdc
 set_global_assignment -name SYSTEMVERILOG_FILE NeXT-Color.sv
+set_global_assignment -name QIP_FILE rtl/pll.qip
+set_global_assignment -name VERILOG_FILE rtl/pll_vid.v
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_vtiming.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_rom.sv
