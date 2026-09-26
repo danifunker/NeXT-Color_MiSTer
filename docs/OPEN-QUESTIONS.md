@@ -93,3 +93,21 @@ and what would settle it. "HS n" = `rom-dissassembly/hardware-summary.md` sectio
 24. Bytes 4-9 are 0 (Previous copies the Ethernet address); the ROM uses its
     header address `00:00:0f:12:34:56` because it is not `FF FF FF`.
 25. Boot commands must be 11 characters or fewer (a 12-character one has no NUL).
+
+## SCSI / TDMA (rtl/tc_scsi.sv, rtl/tc_tdma.sv, from the unit-bench author's notes)
+
+26. **CLRCOMPLETE is conditional** (next_scsi / NetBSD rule: only on a running
+    channel or with SETENABLE; a completion in the same clock wins). Previous
+    clears it unconditionally.
+27. **SETCOMPLETE and CSR FLUSH do nothing** (as Previous); the Turbo NeXTSTEP
+    driver might use them.
+28. **BUSEXC survives a channel RESET** (Previous, NetBSD); only machine reset
+    clears it.
+29. `dma_interrupt` needs ENABLE and uses Next >= Limit (next_scsi also completed
+    a disabled channel at Next == Limit).
+30. hardware-summary 9.3 correction: `scsi_intr` pulses the flush 4 times, not 3.
+31. Selection timeout follows Previous's 20 MHz formula (~314 ms per try, 3 tries
+    per absent target): a boot disk that is not target 0 costs ~1 s per absent
+    lower target.
+32. Only the SCSI channel moves data; network boot needs the Ethernet RX/TX
+    engines and the saved limit ($02004050 reads 0 today).
