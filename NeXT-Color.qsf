@@ -63,6 +63,14 @@ set_global_assignment -name SEED 1
 #           (HDMI); clk_sys +0.714, clk_vid +0.265, clk_ram +0.875.  35,133 ALMs
 #           (84%).  18.2 min.  (Meant to be seed 21; the edit missed, so this is
 #           the same seed on a slightly different netlist.)
+#   seed 1  (a56f083, M4 + T7213 + palette/timing rewrites): 37,454 ALMs (89%), placed
+#           39,171 (93%, 2,804 recoverable by dense packing), LABs 4,130/4,191 (99%)
+#           with routability ALWAYS: HDMI -0.138, clk_ram -0.020, clk_vid +0.506.
+#           LABs stayed at 99% in three fits while ALMs went 91% -> 89%.
+#   seed 1  (a56f083, routability AUTOMATICALLY as an experiment): 37,660 ALMs
+#           (90%), LABs 4,144 (99%) -- no better -- and clk_sys -0.720 (HDMI
+#           +0.085, clk_ram +0.202, clk_vid +0.523).  The LAB count does not
+#           follow either setting; ALWAYS is what keeps clk_sys closed.
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
