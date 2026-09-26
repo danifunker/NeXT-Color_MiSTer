@@ -145,3 +145,18 @@ and what would settle it. "HS n" = `rom-dissassembly/hardware-summary.md` sectio
     completes.  The mono core (same CPU tree without the AP040_EXPERIMENTAL
     macros, gated ce) compiles fine.  Settle: a directed page-end fault test
     in the sim, and an A/B build without the experimental macros.
+    **Reproduced on the bare CPU** (`verilator/cpu/t_pageend.s`, run with
+    `verilator/cpu/run_pageend.sh`): `jsr (a3)` at $5FFE, target valid, the
+    NEXT page $6000 invalid.  This tree (the Quadra drop) takes an access
+    error DURING the jsr: FA = $33FC (the jsr's own stack push, a valid page),
+    SSW $0506 (ATC, read, TM 6 = supervisor code fetch), stacked PC $5FFE --
+    the prefetch of $6000 that the jsr should discard, reported with the data
+    address; the handler repairs the wrong page and the jsr faults again,
+    exactly the NeXTSTEP loop.  Identical with and without
+    AP040_EXPERIMENTAL_XSTORE/LEA (so the macros are not the cause).  The mono
+    core's tree (NeXT_MiSTer) and upstream AP68040 let the jsr complete and
+    fault correctly at $6000 after the return (FA $6000, PC $6000); in this
+    bench they then re-fault at $6000, which looks like a bench/handler
+    artefact of those trees (the mono core compiles fine on hardware).  The
+    fix is in ap040_core.v's early-prefetch fault handling (CPU core code:
+    needs the user's go-ahead).
