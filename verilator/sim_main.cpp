@@ -40,7 +40,17 @@
 #include "imgui.h"
 #include <SDL.h>
 #include <SDL_opengl.h>
+#include "sim_console.h"
 #include "sim_video.h"
+#include "sim_input.h"
+// MacQuadra800's verilator/sim framework: the VGA output in an ImGui window,
+// the host keyboard through SimInput's SDL -> PS/2 mapping.
+DebugConsole console;
+SimVideo video(1120, 832, 0);
+SimInput input(12, console);
+static bool gui_run = true;
+static int  gui_batch = 200000;
+static float gui_scale = 1.0f;
 #endif
 
 static Vemu* top;
@@ -325,7 +335,13 @@ static void step_tick() {
 	bool sys_edge = (tick % 3) == 0;
 	if (sys_edge) top->clk_sys = !top->clk_sys;
 	top->eval();
-	if (top->clk_ram) vga_clock();
+	if (top->clk_ram) {
+		vga_clock();
+#ifdef SIM_GUI
+		video.Clock(!top->VGA_DE, false, top->VGA_HS, top->VGA_VS,
+		            0xFF000000u | (top->VGA_B << 16) | (top->VGA_G << 8) | top->VGA_R);
+#endif
+	}
 	if (sys_edge && top->clk_sys) {
 		cyc++;
 		// reset sequencing: SDRAM init for 16 clocks, machine reset after
@@ -335,6 +351,9 @@ static void step_tick() {
 		top->timestamp    = ((uint64_t)1 << 32) | 1790000000u;   // 2026-09-21 UTC, fixed
 		if (!top->reset) monitor();
 		keyboard_tick();
+#ifdef SIM_GUI
+		input.BeforeEval();
+#endif
 	}
 }
 
@@ -432,8 +451,44 @@ int main(int argc, char** argv) {
 
 	size_t png_i = 0;
 	uint64_t next_hb = opt_heartbeat;
+#ifdef SIM_GUI
+	input.ps2_key = &top->ps2_key;
+	input.Initialise();
+	if (video.Initialise("NeXT-Color sim") == 1) return 1;
+#endif
 	while (!Verilated::gotFinish() && !stop_req) {
+#ifdef SIM_GUI
+		{
+			SDL_Event event;
+			while (SDL_PollEvent(&event)) {
+				ImGui_ImplSDL2_ProcessEvent(&event);
+				if (event.type == SDL_QUIT) stop_req = true;
+			}
+			video.StartFrame();
+			input.Read();
+			ImGui::NewFrame();
+			ImGui::Begin("Simulation");
+			ImGui::SetWindowPos("Simulation", ImVec2(0, 0), ImGuiCond_Once);
+			ImGui::SetWindowSize("Simulation", ImVec2(420, 200), ImGuiCond_Once);
+			ImGui::Checkbox("RUN", &gui_run);
+			ImGui::SliderInt("Batch (ticks)", &gui_batch, 10000, 2000000);
+			ImGui::SliderFloat("Scale", &gui_scale, 0.25f, 1.0f);
+			ImGui::Text("cycle %llu (%.1f ms)  frame %d", (unsigned long long)cyc, cyc / 33000.0, vga_frame);
+			ImGui::Text("pc %08X %s", top->dbg_pc_i, sym_of(top->dbg_pc_i).c_str());
+			ImGui::Text("sr %04X  led %d  ipl %d  int %08X", top->dbg_sr, top->led, top->dbg_ipl, top->dbg_intstat);
+			if (ImGui::Button("VRAM PNG")) dump_vram_png("gui_vram.png");
+			ImGui::End();
+			ImGui::Begin("VGA output");
+			ImGui::SetWindowPos("VGA output", ImVec2(430, 0), ImGuiCond_Once);
+			ImGui::Image(video.texture_id, ImVec2(video.output_width * gui_scale, video.output_height * gui_scale));
+			ImGui::End();
+			video.UpdateTexture();
+			if (!gui_run) continue;
+			for (int b = 0; b < gui_batch && !stop_req; b++) step_tick();
+		}
+#else
 		step_tick();
+#endif
 		if (opt_max_cycles && cyc >= opt_max_cycles) break;
 		if (png_i < opt_png_at.size() && cyc >= opt_png_at[png_i] && (tick % 6) == 0) {
 			char n[64]; snprintf(n, sizeof n, "vram_%llu.png", (unsigned long long)opt_png_at[png_i]);
@@ -455,6 +510,10 @@ int main(int argc, char** argv) {
 	       reached, sizeof(steps) / sizeof(steps[0]), berr_count, led_changes, vga_frame,
 	       (unsigned long long)cyc);
 	if (!opt_vram_png.empty()) dump_vram_png(opt_vram_png.c_str());
+#ifdef SIM_GUI
+	video.CleanUp();
+	input.CleanUp();
+#endif
 	top->final();
 	delete top;
 	return 0;

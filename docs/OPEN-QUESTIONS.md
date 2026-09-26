@@ -73,3 +73,23 @@ and what would settle it. "HS n" = `rom-dissassembly/hardware-summary.md` sectio
     (keys overwrite with overrun).
 18. **Pause key** (inherited): hps_io sends only a make of `$77`, which the table
     maps to backquote: NeXTSTEP would see a stuck backquote, and Win+Pause is an NMI.
+
+## RTC / NVRAM (rtl/tc_mccs1850.sv, from the unit-bench author's notes)
+
+19. **SIMM word** in the default image (`$0009` 64 MB, `$0249` 128 MB, `$0012`
+    16 MB, `$0001` 32 MB; parity bits at bit 12+i, which HS 12.3 calls "9+i")
+    assumes TMC control bit 10 always reads 0 (no parity) and the bank aliasing
+    of HS 3.3. If either changes, the ROM prints "Memory sockets ... configured
+    for ..." and rewrites NVRAM.
+20. **POWERDOWN is ignored**: no power-off output; the ROM spins at `$010083ce`.
+    A `power_off` output could blank the screen and let the power key restart.
+21. FIRSTUP, LBAT, ALARM never set; no alarm compare (as Previous). Only Previous
+    was consulted, not the MCCS1850 datasheet.
+22. **No NVRAM persistence** (user decision): every OSD/power-up reset rebuilds
+    `$00-$1F`, so changes made with the monitor's `p` command are lost. Time is
+    not re-seeded at an OSD reset.
+23. Byte 17 is `$A0` (new clock chip + console slot bits, as Previous); the mono
+    core and the ROM's own default use `$00`.
+24. Bytes 4-9 are 0 (Previous copies the Ethernet address); the ROM uses its
+    header address `00:00:0f:12:34:56` because it is not `FF FF FF`.
+25. Boot commands must be 11 characters or fewer (a 12-character one has no NUL).

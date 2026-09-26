@@ -101,7 +101,8 @@
 //
 //  Reset behaviour
 //    reset         (machine reset and the CPU RESET instruction) only resets
-//                  the serial interface ([P] SCR_Reset -> rtc_interface_reset).
+//                  the serial interface ([P] SCR_Reset -> rtc_interface_reset);
+//                  a transfer cut short by it writes nothing.
 //                  NVRAM, time, alarm, status and control are battery backed.
 //    config_reset  (power-up / OSD reset) rebuilds NVRAM $00-$1F from the
 //                  default image below, sets control = START and clears the
@@ -306,7 +307,7 @@ wire [4:0] nph     = phase + 5'd1;
 wire       a_wr    = addr[7];
 wire       a_clk   = addr[5];                      // [P] RTC_ADDR_CLOCK
 wire [7:0] wr_byte = {sh[6:0], rtc_din};
-wire       commit  = step && (nph == 5'd16) && a_wr;
+wire       commit  = step && (nph == 5'd16) && a_wr && !reset && !config_reset;
 
 assign ram_ra = {addr[6], addr[4:0]};
 assign ram_we = bld_run ? 1'b1 : (commit && !a_clk);

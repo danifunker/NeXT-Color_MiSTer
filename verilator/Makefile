@@ -92,7 +92,21 @@ $(EXE): $(VOUT)
 		[ -e $$o ] && [ $$f -nt $$o ] && rm -f $$o obj_dir/Vemu || true; done
 	(cd obj_dir; $(MAKE) -f Vemu.mk -j$$(nproc))
 
-clean:
-	rm -rf obj_dir rom.hex rom_fast.hex rom_syms.txt
+# GUI variant (MacQuadra800's ImGui/SDL framework): obj_dir_gui/Vemu
+GUI_SRC = sim/sim_console.cpp sim/sim_video.cpp sim/sim_input.cpp \
+	sim/imgui/imgui_impl_sdl.cpp sim/imgui/imgui_impl_opengl2.cpp \
+	sim/imgui/imgui_draw.cpp sim/imgui/imgui_widgets.cpp \
+	sim/imgui/imgui_tables.cpp sim/imgui/imgui.cpp
+GUI_CFLAGS = -O2 -g -I../sim -I../sim/imgui -DSIM_GUI `sdl2-config --cflags`
+GUI_LIBS = -lGL -ldl `sdl2-config --libs`
 
-.PHONY: all clean
+gui: rom.hex rom_fast.hex rom_syms.txt
+	$V -cc $(V_OPT) -exe --Mdir ./obj_dir_gui --build-jobs 0 \
+		$(V_DEFINE) $(V_INC) $(TOP) -CFLAGS "$(GUI_CFLAGS)" -LDFLAGS "$(GUI_LIBS)" \
+		$(V_SRC) $(C_SRC) $(GUI_SRC)
+	(cd obj_dir_gui; $(MAKE) -f Vemu.mk -j$$(nproc))
+
+clean:
+	rm -rf obj_dir obj_dir_gui rom.hex rom_fast.hex rom_syms.txt
+
+.PHONY: all clean gui

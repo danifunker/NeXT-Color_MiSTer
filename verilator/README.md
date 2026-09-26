@@ -22,6 +22,15 @@ command) in about 3 s of machine time.
 the 750 ms video delay patched out (`scripts/make_fastboot_rom.py`): the
 prompt in ~30M cycles instead of ~110M.
 
+## GUI
+
+`make gui` (in `~/NeXT-Color/verilator`) builds `obj_dir_gui/Vemu` with
+MacQuadra800's ImGui/SDL framework: the VGA output in a window, the host
+keyboard through SimInput's SDL -> PS/2 mapping, RUN/batch/scale controls and a
+"VRAM PNG" button. Needs a display (WSLg):
+`wsl -e bash -lc 'cd ~/NeXT-Color/verilator && ./obj_dir_gui/Vemu +rom=rom_fast.hex'`.
+The same command-line options apply.
+
 ## Options (`./obj_dir/Vemu --help`)
 
 | option | |

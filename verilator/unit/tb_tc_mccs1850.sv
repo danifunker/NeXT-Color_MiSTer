@@ -451,6 +451,14 @@ initial begin
 	rtc_read_time(t1);
 	checks = checks + 1;
 	if (t1 - t0 > 1) fail($sformatf("counter ran fast: %0d ticks in 0.5 s", t1 - t0));
+	// white box: consecutive ticks are exactly CLK_HZ clocks apart
+	t0 = dut.tcnt;
+	while (dut.tcnt == t0) @(posedge clk);
+	c0 = cyc; t0 = dut.tcnt;
+	while (dut.tcnt == t0) @(posedge clk);
+	c1 = cyc;
+	expect32(32'(c1 - c0), CLK_HZ, "clocks between two ticks");
+	expect32(dut.tcnt - t0, 32'd1, "one second per tick");
 	// write the counter ($A0..$A3) and read it back
 	rtc_write(8'h20, 8'h12); rtc_write(8'h21, 8'h34); rtc_write(8'h22, 8'h56); rtc_write(8'h23, 8'h00);
 	rtc_read_time(t0);
@@ -533,6 +541,17 @@ initial begin
 	@(posedge clk); reset <= 1'b0; ce <= 1'b0; sclk <= 1'b0;
 	wait_clks(D);
 	rtc_read(8'h06, v); expect8(v, 8'hE1 - 8'h06, "reg 6 after an aborted transfer");
+	// a reset in the same clock as the 16th falling edge: no write
+	scr2(1'b1, 1'b0, 1'b0);
+	send_addr(8'h87);
+	for (i = 0; i < 8; i = i + 1) begin
+		scr2(1'b1, 1'b0, 1'b1); scr2(1'b1, 1'b1, 1'b1);
+		if (i < 7) scr2(1'b1, 1'b0, 1'b1);
+	end
+	@(posedge clk); sclk <= 1'b0; reset <= 1'b1;
+	@(posedge clk); reset <= 1'b0; ce <= 1'b0;
+	wait_clks(D);
+	rtc_read(8'h07, v); expect8(v, 8'hE1 - 8'h07, "reg 7 after a reset on the last edge");
 	rtc_write(8'h31, 8'h80);
 
 	//------------------------------------------------------------
