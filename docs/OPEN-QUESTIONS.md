@@ -136,3 +136,12 @@ and what would settle it. "HS n" = `rom-dissassembly/hardware-summary.md` sectio
 38. **CRC bytes are zeros**: an accepted frame is stored 4 bytes longer
     (Previous len += 4), padded to 64; Previous leaves stale buffer bytes
     there, a real chip the FCS.
+
+## CPU / MMU under NeXTSTEP
+
+39. **`cc` hangs in a translation-fault loop** (hardware, seed 3, 2026-09-26):
+    every `cc` run spins at a `jsr (a3)` in the last word of an 8 KB page
+    ($5FFE), ~4,000 translation faults/s, no page-ins, the instruction never
+    completes.  The mono core (same CPU tree without the AP040_EXPERIMENTAL
+    macros, gated ce) compiles fine.  Settle: a directed page-end fault test
+    in the sim, and an A/B build without the experimental macros.
