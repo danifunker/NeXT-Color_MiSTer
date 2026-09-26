@@ -59,6 +59,10 @@ set_global_assignment -name SEED 1
 #   seed 1  (1be854e, 2026-09-26): 34,974 ALMs (83%), 263 M10K; clk_sys -0.068 ns
 #           (TNS -0.106, all inside ap040_core epf_data), HDMI -0.069 ns (sys/),
 #           clk_vid +0.318, clk_ram +0.427, hold +0.239.  19.5 min.
+#   seed 1  (166b2de, the MCCS1850 reset fix on top): TIMING MET, worst +0.191 ns
+#           (HDMI); clk_sys +0.714, clk_vid +0.265, clk_ram +0.875.  35,133 ALMs
+#           (84%).  18.2 min.  (Meant to be seed 21; the edit missed, so this is
+#           the same seed on a slightly different netlist.)
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
