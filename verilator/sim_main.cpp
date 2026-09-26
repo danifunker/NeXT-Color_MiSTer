@@ -73,6 +73,7 @@ static uint64_t opt_reset_cycles = 5000;     // machine reset after SDRAM init
 static bool     opt_quiet_calls = false;
 static std::vector<std::pair<uint64_t, std::string>> opt_type;   // --type CYC:text
 static uint64_t opt_trace_pc_from = 0, opt_trace_pc_n = 0;       // --trace-pc FROM,N
+static uint64_t opt_color_bars = 0;                              // --color-bars CYCLE
 
 // ------------------------------------------------------------------ symbols
 static std::map<uint32_t, std::string> syms;
@@ -176,6 +177,45 @@ static void dump_vram_png(const char* name) {
 		img[i] = (lut_byte(top->lut_r, r) << 16) | (lut_byte(top->lut_g, g) << 8) | lut_byte(top->lut_b, b);
 	}
 	write_png(name, img.data(), FB_W, FB_H, FB_W);
+}
+
+// Sim-only: write colour bars into VRAM through the DDR3 model's backdoor
+// (rows 560..799), to show the scan-out + Bt463 path in colour while the
+// ROM monitor (which only draws greys) is on screen.  Pixel format
+// RRRRGGGGBBBBxxxx, big-endian, stored as the VRAM engine does (the pixel's
+// high byte at the even byte of the little-endian DDR word).
+static void poke_color_bars() {
+	for (int y = 560; y < 800; y++) {
+		for (int w = 0; w < FB_W / 4; w++) {
+			uint64_t word = 0;
+			for (int p = 0; p < 4; p++) {
+				int x = w * 4 + p, bar = x / 70;          // 16 bars of 70 pixels
+				int r, g, b;
+				switch ((y - 560) / 60) {
+				case 0:  r = bar; g = 0; b = 0; break;       // red ramp
+				case 1:  r = 0; g = bar; b = 0; break;       // green ramp
+				case 2:  r = 0; g = 0; b = bar; break;       // blue ramp
+				default: {                                   // 8 saturated colours, then 8 pastels
+					int c = bar & 7;
+					r = (c & 4) ? 15 : 0; g = (c & 2) ? 15 : 0; b = (c & 1) ? 15 : 0;
+					if (bar >= 8) { r = r ? 15 : 8; g = g ? 15 : 8; b = b ? 15 : 8; }
+				}
+				}
+				uint16_t pix = (uint16_t)((r << 12) | (g << 8) | (b << 4));
+				word |= (uint64_t)(pix >> 8) << (16 * p);
+				word |= (uint64_t)(pix & 0xFF) << (16 * p + 8);
+			}
+			top->vram_poke_addr = (uint32_t)(y * (FB_W / 4) + w);
+			top->vram_poke_data = word;
+			top->vram_poke_en = 1;
+			// the DDR3 model's clk_ram: one rising edge with the port enabled
+			top->clk_ram = 0; top->eval();
+			top->clk_ram = 1; top->eval();
+			top->vram_poke_en = 0;
+			top->clk_ram = 0; top->eval();
+		}
+	}
+	printf("[SIM] colour bars written into VRAM rows 560-799 @%llu\n", (unsigned long long)cyc);
 }
 
 static void vga_clock() {
@@ -373,7 +413,8 @@ static void usage() {
 	       "  --ram N               0=64MB (default) 1=128MB 2=16MB 3=32MB\n"
 	       "  --pot-on              NVRAM default image with the power-on test on (POT $11)\n"
 	       "  --boot CMD            NVRAM default boot command (default: empty -> prompt)\n"
-	       "  --type CYC:TEXT       type TEXT on the keyboard from cycle CYC ('|' = Return)\n");
+	       "  --type CYC:TEXT       type TEXT on the keyboard from cycle CYC ('|' = Return)\n"
+	       "  --color-bars CYC      sim-only: write colour bars into VRAM at cycle CYC\n");
 }
 
 static std::vector<uint64_t> parse_list(const char* s) {
@@ -402,6 +443,7 @@ int main(int argc, char** argv) {
 			auto v = parse_list(next());
 			if (v.size() == 2) { opt_trace_pc_from = v[0]; opt_trace_pc_n = v[1]; }
 		}
+		else if (a == "--color-bars") opt_color_bars = strtoull(next(), nullptr, 0);
 		else if (a == "--heartbeat") opt_heartbeat = strtoull(next(), nullptr, 0);
 		else if (a == "--syms") opt_syms = next();
 		else if (a == "--vram-png") opt_vram_png = next();
@@ -443,6 +485,7 @@ int main(int argc, char** argv) {
 	}
 	top->ps2_key = 0;
 	top->ps2_mouse = 0;
+	top->vram_poke_en = 0;
 	top->eval();
 
 	static const char* ram_names[4] = {"64 MB", "128 MB", "16 MB", "32 MB"};
@@ -490,6 +533,10 @@ int main(int argc, char** argv) {
 		step_tick();
 #endif
 		if (opt_max_cycles && cyc >= opt_max_cycles) break;
+		if (opt_color_bars && cyc >= opt_color_bars && (tick % 6) == 0) {
+			poke_color_bars();
+			opt_color_bars = 0;
+		}
 		if (png_i < opt_png_at.size() && cyc >= opt_png_at[png_i] && (tick % 6) == 0) {
 			char n[64]; snprintf(n, sizeof n, "vram_%llu.png", (unsigned long long)opt_png_at[png_i]);
 			dump_vram_png(n);

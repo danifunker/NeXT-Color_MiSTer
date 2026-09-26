@@ -25,7 +25,11 @@ module ddr3_model #(
 	input             we,
 
 	input    [AW-1:0] peek_addr,
-	output     [63:0] peek_data
+	output     [63:0] peek_data,
+	// sim-only backdoor write (sim_main.cpp --color-bars)
+	input             poke_en,
+	input    [AW-1:0] poke_addr,
+	input      [63:0] poke_data
 );
 
 reg [63:0] mem [0:(1<<AW)-1];
@@ -74,6 +78,8 @@ always @(posedge clk) begin
 			if (rd_left == 8'd1) rd_pend <= 0;
 		end
 	end
+
+	if (poke_en) mem[poke_addr] <= poke_data;
 
 	// BUSY about one clock in eight, never while a read is streaming out
 	busy <= (lfsr[2:0] == 3'd0);

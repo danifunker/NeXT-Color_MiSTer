@@ -65,6 +65,9 @@ module emu
 	// VRAM peek for the PNG dump (64-bit DDR word index) and the palette
 	input  [17:0] vram_peek_addr,
 	output [63:0] vram_peek_data,
+	input         vram_poke_en,
+	input  [17:0] vram_poke_addr,
+	input  [63:0] vram_poke_data,
 	output [127:0] lut_r,
 	output [127:0] lut_g,
 	output [127:0] lut_b
@@ -286,7 +289,10 @@ ddr3_model ddr
 	.be(DDRAM_BE),
 	.we(DDRAM_WE),
 	.peek_addr(vram_peek_addr),
-	.peek_data(vram_peek_data)
+	.peek_data(vram_peek_data),
+	.poke_en(vram_poke_en),
+	.poke_addr(vram_poke_addr),
+	.poke_data(vram_poke_data)
 );
 
 // ---------------------------------------------------------------- ROM
