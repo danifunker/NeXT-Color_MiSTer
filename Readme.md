@@ -8,6 +8,40 @@ A NeXTstation Turbo Color (33 MHz 68040, Turbo chipset, 12-bit color, 1120x832) 
 * Design decisions: `docs/DECISIONS.md`. Hand-off state: the newest `RESUME-*.md`.
 * ROM analysis (the RTL spec): `rom-dissassembly/hardware-summary.md`. Hardware references: `RESOURCES.md`.
 
+## Display: use 1080p
+
+The NeXT screen is 1120x832. If `MiSTer.ini` does not set a video mode, the MiSTer
+takes the display's preferred mode, often 1280x720. It then has to shrink 832
+lines into 720, and the ROM monitor's text comes out smeared. Give the core its
+own 1080p section instead:
+
+1. Edit `/media/fat/MiSTer.ini` on the SD card, over SSH or with the card in a PC.
+   Keep a copy of the original first, for example `cp MiSTer.ini MiSTer.ini.bak`.
+2. Add this section at the end of the file. The section name must match the
+   core name exactly.
+
+   ```ini
+   [NeXT-Color]
+   video_mode=8      ; 1920x1080@60
+   ```
+
+3. Load the core again, or reboot the MiSTer. The MiSTer reads the core's
+   section each time the core loads.
+
+Then choose the look in the core's OSD, under **Scale**:
+
+| Scale | Result on 1080p |
+|---|---|
+| Normal | fills the screen height (1454x1080). Slightly soft, because 832 lines stretch to 1080 |
+| V-Integer | 1:1 pixel-perfect 1120x832, centred with borders. The sharpest text |
+
+**Aspect ratio** "Original" is 1120:832 (35:26), i.e. square pixels, as on the
+NeXT display.
+
+To undo the change, delete the `[NeXT-Color]` section. Other `video_mode` values
+are listed in the MiSTer.ini that ships with MiSTer (for example `9` is
+1920x1080@50).
+
 The notes below come from the MiSTer template and describe the standard core layout. `<core_name>` is `NeXT-Color`.
 
 ## Source structure
