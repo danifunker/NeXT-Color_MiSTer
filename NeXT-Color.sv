@@ -160,9 +160,15 @@ always @(posedge clk_sys) begin
 	else if (kms_reset_cnt != 0) kms_reset_cnt <= kms_reset_cnt - 1'd1;
 end
 
-wire config_reset = RESET | status[0] | buttons[1] | (ioctl_download && rom_index) |
-                    ~rom_loaded | ~pll_locked;
-wire reset = config_reset | (kms_reset_cnt != 0);
+// Registered, as the mono core learned (NeXT_MiSTer RESUME-20260925: the
+// reset nets fan out to thousands of flops; a register lets Quartus put
+// them on a global).
+reg config_reset = 1, reset = 1;
+always @(posedge clk_sys) begin
+	config_reset <= RESET | status[0] | buttons[1] | (ioctl_download && rom_index) |
+	                ~rom_loaded | ~pll_locked;
+	reset        <= config_reset | (kms_reset_cnt != 0);
+end
 
 // Machine configuration, sampled while the machine is in reset so the ROM
 // never sees it change under it (the MacQuadra800 lesson).
