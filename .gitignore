@@ -80,3 +80,4 @@ verilator/sim_run*.log
 verilator/*.fst
 verilator/*.vcd
 verilator/screenshot_*.png
+verilator/rom_syms.txt

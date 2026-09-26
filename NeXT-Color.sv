@@ -27,7 +27,7 @@
 //    boot ROM   M10K (rtl/tc_rom.sv), loaded from games/NeXT-Color/boot.rom
 //    VRAM       DDR3 (2 MB)
 //
-//  M0 skeleton: clocks, hps_io, ROM loader, TMC-timed test pattern.
+//  Machine: rtl/tc_machine.sv; memories + scan-out: rtl/tc_memsys.sv.
 //============================================================================
 
 module emu
@@ -41,8 +41,6 @@ assign ADC_BUS  = 'Z;
 assign USER_OUT = '1;
 assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
-assign {SDRAM_DQ, SDRAM_A, SDRAM_BA, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQMH, SDRAM_nWE, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nCS} = 'Z;
-assign {DDRAM_CLK, DDRAM_BURSTCNT, DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, DDRAM_RD, DDRAM_WE} = '0;
 
 assign VGA_SL = 0;
 assign VGA_F1 = 0;
@@ -68,6 +66,8 @@ localparam CONF_STR = {
 	"NeXT-Color;;",
 	"-;",
 	"O[4:3],Memory,64 MB,128 MB,16 MB,32 MB;",
+	"O[5],Power-on self test,On,Off;",
+	"O[8:6],Boot device,Prompt (NeXT>),SCSI disk,Network,Floppy;",
 	"-;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[125:123],Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
@@ -148,22 +148,37 @@ always @(posedge clk_sys) begin
 	if (rom_dl_d && !(ioctl_download && rom_index)) rom_loaded <= 1;
 end
 
-wire [31:0] rom_q;
-tc_rom rom
-(
-	.clk(clk_sys),
-	// the ioctl halfword carries file byte 0 in [7:0]: swap to big-endian
-	.we(ioctl_download && rom_index && ioctl_wr && ioctl_addr[26:17] == 0),
-	.waddr(ioctl_addr[16:1]),
-	.wdata({ioctl_dout[7:0], ioctl_dout[15:8]}),
-	.raddr(15'd0),
-	.rdata(rom_q)
-);
 
 ///////////////////////   RESET   ////////////////////////////////
 
-wire reset = RESET | status[0] | buttons[1] | (ioctl_download && rom_index) |
-             ~rom_loaded | ~pll_locked;
+// The KMS magic reset ($C6 $1000A825, hardware-summary 6.2) resets the
+// machine but not the NVRAM image; the OSD/power-up reset rebuilds it.
+wire        reset_req;
+reg   [7:0] kms_reset_cnt = 0;
+always @(posedge clk_sys) begin
+	if (reset_req) kms_reset_cnt <= 8'hFF;
+	else if (kms_reset_cnt != 0) kms_reset_cnt <= kms_reset_cnt - 1'd1;
+end
+
+wire config_reset = RESET | status[0] | buttons[1] | (ioctl_download && rom_index) |
+                    ~rom_loaded | ~pll_locked;
+wire reset = config_reset | (kms_reset_cnt != 0);
+
+// Machine configuration, sampled while the machine is in reset so the ROM
+// never sees it change under it (the MacQuadra800 lesson).
+reg  [1:0] ram_cfg  = 2'd0;
+reg        pot_on   = 1'b1;
+reg [95:0] boot_cmd = 96'd0;
+always @(posedge clk_sys) if (config_reset) begin
+	ram_cfg <= status[4:3];                 // 0 = 64 MB, 1 = 128 MB, 2 = 16 MB, 3 = 32 MB
+	pot_on  <= ~status[5];
+	case (status[8:6])
+	3'd1:    boot_cmd <= {"sd", 80'd0};
+	3'd2:    boot_cmd <= {"en", 80'd0};
+	3'd3:    boot_cmd <= {"fd", 80'd0};
+	default: boot_cmd <= 96'd0;             // empty: the ROM stops at NeXT>
+	endcase
+end
 
 // video-domain reset: two-flop synchronizer of the PLL lock
 reg vrst_meta = 1, vrst = 1;
@@ -172,54 +187,172 @@ always @(posedge clk_vid) begin
 	vrst      <= vrst_meta;
 end
 
-///////////////////////   VIDEO   ////////////////////////////////
+///////////////////////   MACHINE   //////////////////////////////
 
-wire        hs, vs, hbl, vbl;
-wire [11:0] vx, vy;
-tc_vtiming vtiming
+wire        mem_req, mem_write;
+wire [26:2] mem_addr;
+wire  [3:0] mem_be;
+wire [31:0] mem_wdata;
+wire  [1:0] mem_memsel;
+wire [31:0] mem_rdata;
+wire        mem_ack;
+wire        mem_wp_valid;
+wire [26:2] mem_wp_addr;
+wire  [3:0] mem_wp_be;
+wire [31:0] mem_wp_data;
+wire        mem_wq_room;
+wire        mem_line_valid;
+wire [26:4] mem_line_tag;
+wire [127:0] mem_line_data;
+wire        mem_line_pending;
+wire [26:4] mem_line_pending_tag;
+
+wire [31:0] tmc_hreg, tmc_vreg;
+wire        video_enable;
+wire [127:0] lut_r, lut_g, lut_b;
+wire        vbl_pulse;
+wire        led;
+
+tc_machine machine
 (
-	.clk_vid(clk_vid),
-	.reset(vrst),
-	.hreg(32'h31048118),
-	.vreg(32'h10430340),
-	.hs(hs),
-	.vs(vs),
-	.hblank(hbl),
-	.vblank(vbl),
-	.x(vx),
-	.y(vy),
-	.line_pre(),
-	.frame_start(),
-	.vbl_start(),
-	.h_active(),
-	.v_active()
+	.clk(clk_sys),
+	.nreset(~reset),
+	.ce(1'b1),
+	.config_reset(config_reset),
+	.ram_cfg(ram_cfg),
+
+	.mem_req(mem_req),
+	.mem_write(mem_write),
+	.mem_addr(mem_addr),
+	.mem_be(mem_be),
+	.mem_wdata(mem_wdata),
+	.mem_memsel(mem_memsel),
+	.mem_rdata(mem_rdata),
+	.mem_ack(mem_ack),
+	.mem_wp_valid(mem_wp_valid),
+	.mem_wp_addr(mem_wp_addr),
+	.mem_wp_be(mem_wp_be),
+	.mem_wp_data(mem_wp_data),
+	.mem_wq_room(mem_wq_room),
+	.mem_line_valid(mem_line_valid),
+	.mem_line_tag(mem_line_tag),
+	.mem_line_data(mem_line_data),
+	.mem_line_pending(mem_line_pending),
+	.mem_line_pending_tag(mem_line_pending_tag),
+
+	.tmc_hreg(tmc_hreg),
+	.tmc_vreg(tmc_vreg),
+	.video_enable(video_enable),
+	.lut_r(lut_r),
+	.lut_g(lut_g),
+	.lut_b(lut_b),
+	.vbl_pulse(vbl_pulse),
+
+	.ps2_key(ps2_key),
+	.ps2_mouse(ps2_mouse),
+	.timestamp(timestamp),
+	.pot_on(pot_on),
+	.boot_cmd(boot_cmd),
+
+	.led(led),
+	.reset_req(reset_req),
+
+	.dbg_berr(),
+	.dbg_berr_addr(),
+	.debug_status(),
+	.debug_status2(),
+	.debug_fault(),
+	.debug_halted(),
+	.dbg_intstat(),
+	.dbg_ipl()
 );
 
-// M0 test pattern: 16 vertical colour bars of the 12-bit palette ramp and a
-// one-pixel white frame, so the scaler's placement can be judged.
-reg  [7:0] r, g, b;
-reg        hs_o, vs_o, de_o;
-wire       border = (vx == 0) || (vx == 12'd1119) || (vy == 0) || (vy == 12'd831);
-wire [3:0] bar    = vx[10:7];
-always @(posedge clk_vid) begin
-	hs_o <= hs;
-	vs_o <= vs;
-	de_o <= ~(hbl | vbl);
-	if (border) {r, g, b} <= 24'hFFFFFF;
-	else begin
-		r <= bar[0] ? {vy[9:6], vy[9:6]} : 8'd0;
-		g <= bar[1] ? {vy[9:6], vy[9:6]} : 8'd0;
-		b <= bar[2] ? {vy[9:6], vy[9:6]} : 8'd0;
-	end
-end
+///////////////////////   MEMORY + VIDEO   ///////////////////////
+
+wire [7:0] vga_r, vga_g, vga_b;
+wire       vga_hs, vga_vs, vga_de;
+
+assign DDRAM_CLK = clk_ram;
+
+tc_memsys memsys
+(
+	.clk_sys(clk_sys),
+	.clk_ram(clk_ram),
+	.clk_vid(clk_vid),
+	.reset(reset),
+	.reset_vid(vrst),
+	.sdram_init(~pll_locked),
+
+	.mem_req(mem_req),
+	.mem_write(mem_write),
+	.mem_addr(mem_addr),
+	.mem_be(mem_be),
+	.mem_wdata(mem_wdata),
+	.mem_memsel(mem_memsel),
+	.mem_rdata(mem_rdata),
+	.mem_ack(mem_ack),
+	.mem_wp_valid(mem_wp_valid),
+	.mem_wp_addr(mem_wp_addr),
+	.mem_wp_be(mem_wp_be),
+	.mem_wp_data(mem_wp_data),
+	.mem_wq_room(mem_wq_room),
+	.mem_line_valid(mem_line_valid),
+	.mem_line_tag(mem_line_tag),
+	.mem_line_data(mem_line_data),
+	.mem_line_pending(mem_line_pending),
+	.mem_line_pending_tag(mem_line_pending_tag),
+
+	// boot.rom is ioctl index 0 (the Main loads games/NeXT-Color/boot.rom at
+	// core start), the OSD "Load boot ROM" entry is index 1.  The ioctl
+	// halfword carries file byte 0 in [7:0]: swap to big-endian.
+	.rom_we(ioctl_download && rom_index && ioctl_wr && ioctl_addr[26:17] == 0),
+	.rom_waddr(ioctl_addr[16:1]),
+	.rom_wdata({ioctl_dout[7:0], ioctl_dout[15:8]}),
+
+	.hreg(tmc_hreg),
+	.vreg(tmc_vreg),
+	.video_enable(video_enable),
+	.lut_r(lut_r),
+	.lut_g(lut_g),
+	.lut_b(lut_b),
+	.vbl_pulse(vbl_pulse),
+	.vga_r(vga_r),
+	.vga_g(vga_g),
+	.vga_b(vga_b),
+	.vga_hs(vga_hs),
+	.vga_vs(vga_vs),
+	.vga_de(vga_de),
+
+	.SDRAM_DQ(SDRAM_DQ),
+	.SDRAM_A(SDRAM_A),
+	.SDRAM_DQML(SDRAM_DQML),
+	.SDRAM_DQMH(SDRAM_DQMH),
+	.SDRAM_BA(SDRAM_BA),
+	.SDRAM_nCS(SDRAM_nCS),
+	.SDRAM_nWE(SDRAM_nWE),
+	.SDRAM_nRAS(SDRAM_nRAS),
+	.SDRAM_nCAS(SDRAM_nCAS),
+	.SDRAM_CKE(SDRAM_CKE),
+	.SDRAM_CLK(SDRAM_CLK),
+
+	.DDRAM_BUSY(DDRAM_BUSY),
+	.DDRAM_BURSTCNT(DDRAM_BURSTCNT),
+	.DDRAM_ADDR(DDRAM_ADDR),
+	.DDRAM_DOUT(DDRAM_DOUT),
+	.DDRAM_DOUT_READY(DDRAM_DOUT_READY),
+	.DDRAM_RD(DDRAM_RD),
+	.DDRAM_DIN(DDRAM_DIN),
+	.DDRAM_BE(DDRAM_BE),
+	.DDRAM_WE(DDRAM_WE)
+);
 
 assign CLK_VIDEO = clk_vid;
 assign CE_PIXEL  = 1'b1;
-assign VGA_R  = r;
-assign VGA_G  = g;
-assign VGA_B  = b;
-assign VGA_HS = ~hs_o;
-assign VGA_VS = ~vs_o;
+assign VGA_R  = vga_r;
+assign VGA_G  = vga_g;
+assign VGA_B  = vga_b;
+assign VGA_HS = ~vga_hs;
+assign VGA_VS = ~vga_vs;
 
 // Aspect ratio and scaling (sys/video_freak.sv).  "Original" is 1120:832 =
 // 35:26, square pixels (the mono core's lesson: a 4:3 declaration squeezes
@@ -230,13 +363,13 @@ video_freak video_freak
 (
 	.CLK_VIDEO(clk_vid),
 	.CE_PIXEL(1'b1),
-	.VGA_VS(~vs_o),
+	.VGA_VS(~vga_vs),
 	.HDMI_WIDTH(HDMI_WIDTH),
 	.HDMI_HEIGHT(HDMI_HEIGHT),
 	.VGA_DE(VGA_DE),
 	.VIDEO_ARX(VIDEO_ARX),
 	.VIDEO_ARY(VIDEO_ARY),
-	.VGA_DE_IN(de_o),
+	.VGA_DE_IN(vga_de),
 	.ARX((!ar) ? 12'd35 : (ar - 1'd1)),
 	.ARY((!ar) ? 12'd26 : 12'd0),
 	.CROP_SIZE(12'd0),
@@ -244,6 +377,6 @@ video_freak video_freak
 	.SCALE(status[125:123])
 );
 
-assign LED_USER = ~rom_loaded | reset;
+assign LED_USER = led;
 
 endmodule

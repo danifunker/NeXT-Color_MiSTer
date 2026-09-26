@@ -3,5 +3,33 @@ set_global_assignment -name SDC_FILE NeXT-Color.sdc
 set_global_assignment -name SYSTEMVERILOG_FILE NeXT-Color.sv
 set_global_assignment -name QIP_FILE rtl/pll.qip
 set_global_assignment -name VERILOG_FILE rtl/pll_vid.v
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_vtiming.sv
+
+# CPU: the MacQuadra800 AP68040 tree and its wrapper (rtl/ap68040/UPSTREAM.md)
+set_global_assignment -name QIP_FILE rtl/ap68040/rtl/ap040.qip
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/ap68040/experimental/ap040_pipeline_integer.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/wombat_cpu.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/wombat_store_buffer.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/wombat_bus32.sv
+set_global_assignment -name VERILOG_FILE rtl/dpram.v
+
+# memory: SDRAM bridge (MacQuadra800), ROM, VRAM/scan-out
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/sdram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/sdram_beat32.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_memsys.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_rom.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_vram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_vtiming.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_dpram_dc.sv
+
+# machine and devices
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_machine.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_tmc.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_scr.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_mccs1850.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_intc.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_timers.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_bt463.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_kms.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_regfile.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_scc.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_esp_mini.sv
