@@ -48,7 +48,7 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-set_global_assignment -name SEED 1
+set_global_assignment -name SEED 2
 
 # Fitter recipe and build switches from MacQuadra800_MiSTer (its release recipe,
 # minus MISTER_DISABLE_SHADOWMASK and the other switches that need its patched sys/,
@@ -81,6 +81,11 @@ set_global_assignment -name SEED 1
 #     seed 1: 37,483 ALMs: TIMING MET, worst +0.208 (clk_sys); HDMI +0.240,
 #             clk_ram +0.286, clk_vid +1.118, hold +0.246.  rbf md5 6382ea7a.
 #             On hardware: cc and NWBench's Compile run.  Kept.
+#   b9adc78 (+ the 2.88 MB floppy, next_floppy), 2026-09-26:
+#     seed 1: 38,465 ALMs (92%): -0.247 ns: TIMING NOT MET.
+#     seed 2: 38,149 ALMs (91%): TIMING MET, worst +0.062 ns.  rbf md5
+#             3aa9a91c.  On hardware: NeXTSTEP boots, formats, mounts and
+#             writes a 2.88 MB floppy.  Kept.
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
