@@ -86,6 +86,10 @@ set_global_assignment -name SEED 2
 #     seed 2: 38,149 ALMs (91%): TIMING MET, worst +0.062 ns.  rbf md5
 #             3aa9a91c.  On hardware: NeXTSTEP boots, formats, mounts and
 #             writes a 2.88 MB floppy.  Kept.
+#   2cd616c (+ Ethernet: next_enet_bridge, next_ddram_arb), 2026-09-27:
+#     seed 2: 38,548 ALMs (92%): TIMING MET, worst +0.231 ns.  rbf md5
+#             b54060fa.  On hardware: NeXTSTEP en0 at 192.168.99.38 pings
+#             the router and answers pings and TCP from the LAN.  Kept.
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
