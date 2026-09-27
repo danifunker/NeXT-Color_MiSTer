@@ -44,6 +44,8 @@ module emu
 
 	output        led,
 	output        reset_req,
+	output [15:0] audio_l,         // sound out (tc_kms), signed, per 44.1 kHz tick
+	output [15:0] audio_r,
 
 	// CPU / machine observation
 	output [31:0] dbg_pc,          // fetch pointer
@@ -215,6 +217,7 @@ tc_machine machine
 
 	.led(led),
 	.reset_req(reset_req),
+	.audio_l(audio_l), .audio_r(audio_r),
 
 	.dbg_berr(dbg_berr),
 	.dbg_berr_addr(dbg_berr_addr),

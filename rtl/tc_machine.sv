@@ -131,6 +131,10 @@ module tc_machine
 	output            led,
 	output            reset_req,          // KMS magic reset: the top resets the machine
 
+	// sound out (tc_kms): signed 16-bit stereo, new value per 44.1 kHz tick
+	output     [15:0] audio_l,
+	output     [15:0] audio_r,
+
 	// debug
 	output            dbg_berr,
 	output     [31:0] dbg_berr_addr,
@@ -383,6 +387,9 @@ reg         io_tmc;           // the access is in the TMC window
 wire dev_rst = !nreset;
 
 wire        kms_power_key;
+wire        int_snd_ovrun;
+wire        so_req, so_ack, so_avail;  // tc_kms <-> tc_tdma sound out channel
+wire [31:0] so_rdata;
 
 // interrupt sources (levels), Previous sysReg.h bit names (includes/sysReg.h:24-55)
 wire        int_power, int_keymouse, int_timer, int_video, int_tmc_nmi, int_kms_nmi;
@@ -413,7 +420,7 @@ wire [31:0] int_src = {int_tmc_nmi | int_kms_nmi,  // 31 INT_NMI
                        1'b0,                       // 11 INT_PRINTER
                        int_en_tx,                  // 10 INT_EN_TX (tc_enet TX status & mask)
                        int_en_rx,                  // 9 INT_EN_RX (tc_enet RX status & mask)
-                       1'b0,                       // 8
+                       int_snd_ovrun,              // 8 INT_SOUND_OVRUN (tc_kms sound out underrun)
                        int_floppy,                 // 7 INT_PHONE = the 82077 (next_floppy)
                        2'd0,                       // 6..5
                        1'b0,                       // 4
@@ -476,7 +483,7 @@ tc_bt463 dac (
 	.pal_we(pal_we), .pal_n(pal_n), .pal_d(pal_d)
 );
 
-// KMS (keyboard / mouse; sound later)
+// KMS (keyboard / mouse / sound out; the sound-out DMA channel is tc_tdma's)
 wire [31:0] kms_rdata; wire kms_ack;
 tc_kms #(.CLK_HZ(CLK_HZ)) kms (
 	.clk(clk), .reset(dev_rst),
@@ -484,12 +491,14 @@ tc_kms #(.CLK_HZ(CLK_HZ)) kms (
 	.rdata(kms_rdata), .ack(kms_ack),
 	.ps2_key(ps2_key), .ps2_mouse(ps2_mouse),
 	.int_keymouse(int_keymouse), .nmi(int_kms_nmi), .power_key(kms_power_key),
-	.reset_req(reset_req), .dbg_cmd()
+	.reset_req(reset_req), .dbg_cmd(),
+	.so_req(so_req), .so_ack(so_ack), .so_rdata(so_rdata), .so_avail(so_avail),
+	.int_snd_ovrun(int_snd_ovrun), .audio_l(audio_l), .audio_r(audio_r)
 );
 
 // PC-chip DMA channels (HS 7): rtl/tc_tdma.sv, every channel's registers;
-// the SCSI and Ethernet TX/RX channels move data through the memory master
-// below.
+// the SCSI, Ethernet TX/RX and sound out channels move data through the
+// memory master below.
 wire [31:0] dma_rdata, enet_rdata, esp_rdata, scc_rdata;
 wire        dma_ack, enet_ack, esp_ack, scc_ack;
 
@@ -529,6 +538,7 @@ tc_tdma dma (
 	.er_req(er_req), .er_wdata(er_wdata), .er_n(er_n), .er_ack(er_ack), .er_err(er_err),
 	.er_enable(er_enable), .er_room(er_room), .er_eof(er_eof), .er_full(er_full),
 	.er_nibble(er_nibble),
+	.so_req(so_req), .so_ack(so_ack), .so_rdata(so_rdata), .so_avail(so_avail),
 	.int_scsi_dma(int_scsi_dma), .int_snd_out_dma(int_snd_out_dma),
 	.int_snd_in_dma(int_snd_in_dma), .int_printer_dma(int_printer_dma),
 	.int_dsp_dma(int_dsp_dma), .int_en_tx_dma(int_en_tx_dma), .int_en_rx_dma(int_en_rx_dma)

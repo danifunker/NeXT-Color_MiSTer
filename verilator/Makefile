@@ -65,6 +65,7 @@ V_SRC = \
 	$(RTL)/tc_timers.sv \
 	$(RTL)/tc_bt463.sv \
 	$(RTL)/tc_kms.sv \
+	$(RTL)/next_sound_output.sv \
 	$(RTL)/tc_enet.sv \
 	$(RTL)/tc_scc.sv \
 	$(RTL)/tc_tdma.sv \
@@ -94,11 +95,11 @@ C_SRC = sim_main.cpp $(HOST_SRC)
 all: $(EXE) rom.hex rom_fast.hex rom_syms.txt
 
 # ROM image as $readmemh longwords (big-endian: file order = byte order)
-rom.hex: ../releases/boot.rom
+rom.hex: ../releases/boot0.rom
 	xxd -p -c4 $< > $@
 
 # sim-only fast boot: CRC, VRAM test and the 750 ms video delay patched out
-rom_fast.hex: ../releases/boot.rom ../scripts/make_fastboot_rom.py
+rom_fast.hex: ../releases/boot0.rom ../scripts/make_fastboot_rom.py
 	python3 ../scripts/make_fastboot_rom.py $< $@
 
 rom_syms.txt: ../rom-dissassembly/known_names.py ../scripts/gen_rom_syms.py

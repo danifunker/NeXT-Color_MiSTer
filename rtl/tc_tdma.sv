@@ -89,9 +89,27 @@
 //      = COMPLETE.
 //    * the saved limit $02004050 reads the RX channel's (dma.c:1180).
 //  The memory master serves one request at a time; SCSI first, then RX,
-//  then TX.
+//  then TX, then sound out.
 //
-//  Other channels (sound out/in, printer, DSP): register model only.  Their
+//  Sound out channel (the client is tc_kms, port so_*), the sound box
+//  side of Previous kms.c kms_sndout_request / dma.c dma_sndout_read_memory
+//  and dma_sndout_intr (dma.c:694-727):
+//    * one longword (one 16-bit stereo frame {L,R}) per request at Next;
+//      Next and Limit are used on longword boundaries (Previous masks a
+//      misaligned pair with ~3, dma.c:701-706).  so_avail = ENABLE and
+//      Next < Limit: the sound box has a buffer to play.
+//    * the word that brings Next to Limit completes the channel
+//      (dma_interrupt, dma.c:361-381): COMPLETE; with SUPDATE continue with
+//      Start/Stop, else clear ENABLE.  Previous raises it when the sound box
+//      asks for the next buffer, one buffer later; the mono core (NeXT_MiSTer
+//      next_kms_snd.sv, on hardware) raises it at the last fetch, as here.
+//    * a word whose client dropped so_req while it was in flight (the KMS
+//      flushed its queue), or whose channel was RESET meanwhile, is
+//      dropped and Next stays (the mono core's dma_cancelled).
+//    * INT_SND_OUT_DMA (bit 23) = COMPLETE; a bus error stops the channel
+//      with COMPLETE|BUSEXC (dma.c:714-718).
+//
+//  Other channels (sound in, printer, DSP): register model only.  Their
 //  CSR status bits are flip-flops (same command semantics); their
 //  Next/Limit/Start/Stop and the plain registers live in one 32-word RAM (no
 //  reset: block RAM / MLAB).  HOOK: to give a channel an engine, move its
@@ -160,6 +178,12 @@ module tc_tdma
 	input             er_eof,        // pulse: the frame is in memory (saved limit, interrupt)
 	input             er_full,       // pulse: Next reached Limit inside a frame (interrupt)
 	output reg  [3:0] er_nibble,     // the saved nibble ($02006007, ethernet.c:600)
+
+	// sound out channel client port (tc_kms so_*): memory -> sound box
+	input             so_req,        // level: read the longword at Next
+	output reg        so_ack,        // pulse: so_rdata valid, Next already advanced
+	output reg [31:0] so_rdata,      // one frame {L[15:0], R[15:0]}
+	output            so_avail,      // ENABLE and Next < Limit
 
 	// interrupt levels (interrupt status bits, Previous sysReg.h)
 	output            int_scsi_dma,     // 26
@@ -236,6 +260,7 @@ reg  [7:0] c_en, c_sup, c_cmp, c_bex, c_dir;    // CSR bits 24, 25, 27, 28; DEV2
 reg [31:0] s_next, s_limit, s_start, s_stop;     // the SCSI channel's pointers
 reg [31:0] t_next, t_limit, t_start, t_stop;     // Ethernet TX
 reg [31:0] r_next, r_limit, r_start, r_stop;     // Ethernet RX
+reg [31:0] o_next, o_limit, o_start, o_stop;     // sound out
 reg [31:0] en_rx_saved_limit;                    // dma.c:852, read at $02004050
 
 wire [31:0] t_end = {2'b00, t_limit[29:0]};      // ENADDR(limit), dma.c:798
@@ -257,6 +282,11 @@ assign et_enable   = c_en[C_ENTX];
 assign et_room     = !t_d[32] && (t_d[31:0] != 32'd0);
 assign er_enable   = c_en[C_ENRX];
 assign er_room     = r_next < r_limit;
+// sound out, in longwords (dma.c:701-706): words left = Limit - Next
+wire [30:0] o_d    = {1'b0, o_limit[31:2]} - {1'b0, o_next[31:2]};
+wire        o_lt   = !o_d[30] && (o_d[29:0] != 30'd0);     // Next < Limit
+wire        o_last = (o_d[29:0] == 30'd1);                  // this word reaches Limit
+assign so_avail    = c_en[C_SNDOUT] && o_lt;
 
 assign int_scsi_dma    = c_cmp[C_SCSI];
 assign int_snd_out_dma = c_cmp[C_SNDOUT];
@@ -290,7 +320,8 @@ end
 
 wire [4:0] ram_idx = is_plain ? {code[2] ? 3'd7 : 3'd0, rsel} :
                      {ch, is_init ? 2'd0 : rsel};
-wire       ch_ff   = (ch == C_SCSI) || (ch == C_ENTX) || (ch == C_ENRX);   // pointers in flip-flops
+wire       ch_ff   = (ch == C_SCSI) || (ch == C_ENTX) || (ch == C_ENRX) ||
+                     (ch == C_SNDOUT);                        // pointers in flip-flops
 wire       ram_hit = ((is_ptr || is_init) && !ch_ff) || is_plain;
 wire       ram_we  = stb && we && ram_hit;
 
@@ -315,8 +346,12 @@ wire [31:0] t_ptr_q = (rsel == 2'd0) ? t_next  : (rsel == 2'd1) ? t_limit :
                       (rsel == 2'd2) ? t_start : t_stop;
 wire [31:0] r_ptr_q = (rsel == 2'd0) ? r_next  : (rsel == 2'd1) ? r_limit :
                       (rsel == 2'd2) ? r_start : r_stop;
-wire [31:0] ff_ptr_q = (ch == C_ENTX) ? t_ptr_q : (ch == C_ENRX) ? r_ptr_q : s_ptr_q;
-wire [31:0] ff_next  = (ch == C_ENTX) ? t_next  : (ch == C_ENRX) ? r_next  : s_next;
+wire [31:0] o_ptr_q = (rsel == 2'd0) ? o_next  : (rsel == 2'd1) ? o_limit :
+                      (rsel == 2'd2) ? o_start : o_stop;
+wire [31:0] ff_ptr_q = (ch == C_ENTX) ? t_ptr_q : (ch == C_ENRX) ? r_ptr_q :
+                       (ch == C_SNDOUT) ? o_ptr_q : s_ptr_q;
+wire [31:0] ff_next  = (ch == C_ENTX) ? t_next  : (ch == C_ENRX) ? r_next  :
+                       (ch == C_SNDOUT) ? o_next : s_next;
 
 always @(posedge clk) begin
 	if (reset) begin
@@ -340,11 +375,12 @@ end
 //----------------------------------------------------------------------------
 // channel engines and register writes
 //----------------------------------------------------------------------------
-localparam [1:0] O_SCSI = 2'd0, O_ENRX = 2'd1, O_ENTX = 2'd2;
+localparam [1:0] O_SCSI = 2'd0, O_ENRX = 2'd1, O_ENTX = 2'd2, O_SNDO = 2'd3;
 reg  [1:0] m_owner;     // whose longword is on the memory master
 reg  [2:0] m_n;         // its byte count (Ethernet)
 reg eval_pend;          // an eval arrived while a SCSI word was in flight
-reg orphan;             // the SCSI client dropped its request before the word finished
+reg orphan;             // the SCSI / sound client dropped its request before the word finished
+reg o_cancel;           // the sound out channel was RESET while its word was in flight
 
 // the TX frame's bytes left in the longword at Next (Next stays on a
 // longword until the frame's last one)
@@ -364,31 +400,37 @@ always @(posedge clk) begin : engine
 	et_err <= 1'b0;
 	er_ack <= 1'b0;
 	er_err <= 1'b0;
+	so_ack <= 1'b0;
 	if (reset) begin
 		// DMA_Reset (dma.c:1226): every CSR cleared
 		c_en <= 8'd0; c_sup <= 8'd0; c_cmp <= 8'd0; c_bex <= 8'd0; c_dir <= 8'd0;
 		s_next <= 32'd0; s_limit <= 32'd0; s_start <= 32'd0; s_stop <= 32'd0;
 		t_next <= 32'd0; t_limit <= 32'd0; t_start <= 32'd0; t_stop <= 32'd0;
 		r_next <= 32'd0; r_limit <= 32'd0; r_start <= 32'd0; r_stop <= 32'd0;
+		o_next <= 32'd0; o_limit <= 32'd0; o_start <= 32'd0; o_stop <= 32'd0;
 		en_rx_saved_limit <= 32'd0;
 		er_nibble <= 4'd0;
 		m_req <= 1'b0; m_we <= 1'b0; m_addr <= 30'd0; m_be <= 4'h0; m_wdata <= 32'd0;
 		m_owner <= O_SCSI; m_n <= 3'd0;
 		sc_rdata <= 32'd0;
 		et_rdata <= 32'd0; et_n <= 3'd0;
+		so_rdata <= 32'd0;
 		eval_pend <= 1'b0;
 		orphan <= 1'b0;
+		o_cancel <= 1'b0;
 	end
 	else begin
 		//------------------------------------------------------------
 		// the memory master: one longword for one client at a time
-		// (SCSI first, then Ethernet RX, then TX)
+		// (SCSI first, then Ethernet RX, then TX, then sound out)
 		//------------------------------------------------------------
 		if (m_req) begin
-			if (m_owner == O_SCSI && !sc_req) orphan <= 1'b1;
+			if ((m_owner == O_SCSI && !sc_req) || (m_owner == O_SNDO && !so_req))
+				orphan <= 1'b1;
 			if (m_err || m_ack) begin
-				m_req  <= 1'b0;
-				orphan <= 1'b0;
+				m_req    <= 1'b0;
+				orphan   <= 1'b0;
+				o_cancel <= 1'b0;
 			end
 			if (m_err) begin
 				// the channel stops with COMPLETE|BUSEXC (dma.c:445-449,
@@ -404,10 +446,15 @@ always @(posedge clk) begin : engine
 					c_en[C_ENRX] <= 1'b0; c_cmp[C_ENRX] <= 1'b1; c_bex[C_ENRX] <= 1'b1;
 					ev[C_ENRX] = 1'b1;
 				end
-				default: begin
+				O_ENTX: begin
 					et_err <= 1'b1;
 					c_en[C_ENTX] <= 1'b0; c_cmp[C_ENTX] <= 1'b1; c_bex[C_ENTX] <= 1'b1;
 					ev[C_ENTX] = 1'b1;
+				end
+				default: begin
+					// sound out: dma.c:714-718 (the client just sees no data)
+					c_en[C_SNDOUT] <= 1'b0; c_cmp[C_SNDOUT] <= 1'b1; c_bex[C_SNDOUT] <= 1'b1;
+					ev[C_SNDOUT] = 1'b1;
 				end
 				endcase
 			end
@@ -423,11 +470,27 @@ always @(posedge clk) begin : engine
 					er_ack <= 1'b1;
 					r_next <= r_next + {29'd0, m_n};
 				end
-				default: begin
+				O_ENTX: begin
 					et_ack   <= 1'b1;
 					et_rdata <= m_rdata;
 					et_n     <= m_n;
 					t_next   <= t_next + {29'd0, m_n};
+				end
+				default: if (so_req && !orphan && !o_cancel) begin
+					// sound out: one frame, then dma_interrupt() on the last
+					so_ack   <= 1'b1;
+					so_rdata <= m_rdata;
+					o_next   <= {o_next[31:2] + 30'd1, 2'b00};
+					if (o_last) begin
+						ev[C_SNDOUT] = 1'b1;
+						c_cmp[C_SNDOUT] <= 1'b1;
+						if (c_sup[C_SNDOUT]) begin
+							c_sup[C_SNDOUT] <= 1'b0;       // 1st done
+							o_next  <= o_start;
+							o_limit <= o_stop;
+						end
+						else c_en[C_SNDOUT] <= 1'b0;       // all done
+					end
 				end
 				endcase
 			end
@@ -457,6 +520,14 @@ always @(posedge clk) begin : engine
 			m_be    <= 4'hF;
 			m_wdata <= 32'd0;
 			m_n     <= t_n;
+		end
+		else if (so_req && !so_ack && so_avail) begin
+			m_req   <= 1'b1;
+			m_owner <= O_SNDO;
+			m_we    <= 1'b0;
+			m_addr  <= o_next[31:2];
+			m_be    <= 4'hF;
+			m_wdata <= 32'd0;
 		end
 
 		//------------------------------------------------------------
@@ -528,6 +599,10 @@ always @(posedge clk) begin : engine
 					c_en[ch]  <= 1'b0;
 					c_sup[ch] <= 1'b0;
 					c_cmp[ch] <= 1'b0;
+					// a sound word in flight is dropped (the mono core's
+					// dma_cancelled); Next stays where the reset found it
+					if (ch == C_SNDOUT && m_req && m_owner == O_SNDO && !m_ack && !m_err)
+						o_cancel <= 1'b1;
 				end
 				if (wcmd[1]) c_sup[ch] <= 1'b1;         // SETSUPDATE
 				if (wcmd[0]) begin                      // SETENABLE
@@ -567,9 +642,18 @@ always @(posedge clk) begin : engine
 				default: r_stop <= merge(r_stop, wdata, be);
 				endcase
 			end
+			if (is_ptr && ch == C_SNDOUT) begin
+				case (rsel)
+				2'd0: o_next  <= merge(o_next,  wdata, be);
+				2'd1: o_limit <= merge(o_limit, wdata, be);
+				2'd2: o_start <= merge(o_start, wdata, be);
+				default: o_stop <= merge(o_stop, wdata, be);
+				endcase
+			end
 			if (is_init && ch == C_SCSI) s_next <= init_val;
 			if (is_init && ch == C_ENTX) t_next <= merge(t_next, wdata, be);
 			if (is_init && ch == C_ENRX) r_next <= merge(r_next, wdata, be);
+			if (is_init && ch == C_SNDOUT) o_next <= merge(o_next, wdata, be);
 		end
 	end
 end

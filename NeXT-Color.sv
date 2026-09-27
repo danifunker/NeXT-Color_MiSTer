@@ -50,9 +50,11 @@ assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
 assign HDMI_BOB_DEINT = 0;
 
+// sound out: the machine's sound box (tc_kms), signed 16-bit stereo, clk_sys
+wire [15:0] audio_l, audio_r;
 assign AUDIO_S = 1;
-assign AUDIO_L = 0;
-assign AUDIO_R = 0;
+assign AUDIO_L = audio_l;
+assign AUDIO_R = audio_r;
 assign AUDIO_MIX = 0;
 
 assign LED_POWER = 0;
@@ -347,6 +349,7 @@ tc_machine machine
 
 	.led(led),
 	.reset_req(reset_req),
+	.audio_l(audio_l), .audio_r(audio_r),
 
 	.dbg_berr(),
 	.dbg_berr_addr(),

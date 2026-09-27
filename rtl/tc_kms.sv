@@ -1,20 +1,22 @@
 //============================================================================
 //  tc_kms -- KMS (keyboard / mouse / sound) interface of the NeXT monitor /
 //  soundbox, CPU registers $0200E000..$0200E00F, for the NeXTstation Turbo
-//  Color.  Keyboard, mouse, command channel and the power key; the sound
-//  side is only a register stub for now (see "SOUND HOOK" below).
+//  Color.  Keyboard, mouse, command channel, the power key and the sound
+//  output (no sound input: no CODEC / microphone on this core).
 //
 //  Derived from the mono core's module NeXT_MiSTer rtl/next/next_kms_snd.sv
 //  (works on hardware).  Kept from it unchanged: the PS/2 set-2 -> NeXT
 //  keycode table (Previous's non-ADB scancode map, Delete deliberately
 //  unassigned), the modifier / Control / Caps Lock tracking, the mouse
-//  packet packing (kms_mouse_move encoding) and the "a write of data byte
-//  $0200E007 executes the command" rule.
-//  Removed: the non-Turbo sound-out DMA channel (CSR $02000040, pointers
-//  $02004030..$0200404C, init $02004240) with its m_* RAM master port, the
-//  audio FIFO / 44.1 kHz tick and the next_sound_output submodule, the
-//  sound-in control sharing, the volume/GPO state and the int_power output.
-//  On the Turbo the sound DMA is a different engine that lives elsewhere.
+//  packet packing (kms_mouse_move encoding), the "a write of data byte
+//  $0200E007 executes the command" rule, and the sound box: the audio FIFO,
+//  the 44.1 kHz tick, the double-sample modes, the underrun report, the
+//  volume / GPO state and the next_sound_output stage (its own file here).
+//  Removed: the non-Turbo sound-out DMA channel registers (CSR $02000040,
+//  pointers $02004030..$0200404C, init $02004240) with the m_* RAM master
+//  port -- on the Turbo that channel is in the PC chip, rtl/tc_tdma.sv, and
+//  this module asks it for frames through the so_* port -- the sound-in
+//  control sharing and the int_power output.
 //  Changed:
 //  - 32-bit device port, big-endian byte enables (machine contract).
 //  - Turbo KMS revision (Previous kms.c: kms.rev = bTurbo ? REV_NEW : ...):
@@ -44,7 +46,11 @@
 //
 //  Registers (addr = longword index; byte lanes big-endian):
 //   $0200E000 (addr 0)
-//     byte 0 $E000 sound status/control   reads 0; writes ignored (SOUND HOOK)
+//     byte 0 $E000 sound status/control   (kms.c:49-54, KMS_Ctrl_Snd_Write
+//              kms.c:639-653) bit 7 SNDOUT_DMA_ENABLE r/w, 6 SNDOUT_DMA_REQUEST
+//              r, 5 SNDOUT_DMA_UNDERRUN r (writing a 1 while sound out is
+//              stopped clears 6/5 and INT_SOUND_OVRUN), 3 SNDIN_DMA_ENABLE r/w
+//              (stored only), 2/1 sound in request/overrun read 0.
 //     byte 1 $E001 KM status/control       bit 7 KM_INT, 6 KM_RECEIVED,
 //              5 KM_OVERRUN, 4 NMI_RECEIVED, 3 KMS_INT, 2 KMS_RECEIVED,
 //              1 KMS_OVERRUN.  Write 1 to bit 5 clears 7/6/5, to bit 4
@@ -79,9 +85,29 @@
 //                       no-response with overrun, anything else (e.g. the
 //                       ROM's $00 = keyboard LED write, data $30000 / 0) ->
 //                       no-response $70000000.  All set KM_RECEIVED.
-//   $C7 $C4 $C2 and ($xx & $C7) == $07 / $03: sound, accepted and ignored.
+//   Sound (kms_command_in kms.c:556-631, snd.c):
+//   ($xx & $C7) == $07  sound out: bit 3 enable (bit 4 double sample, bit 5
+//                       by zero fill, else by repetition), clear = disable
+//                       (clears the underrun/request bits).  A start from
+//                       stopped, or a KMS reset, empties the frame queue.
+//   $C4 CTRLOUT         snd_gpo_access: data bit 28 mute, 27 de-emphasis,
+//                       26/25/24 the volume interface's clock / data /
+//                       strobe (11 bits "111 LR vvvvvv" shifted in)
+//   $C2 VOLCTRL         snd_vol_access (REV_NEW): data byte 0 = "LR vvvvvv"
+//   $C7 ASNDOUT         one direct sample: ignored (as the mono core)
+//   ($xx & $C7) == $03  sound in: accepted, nothing happens (no CODEC)
 //  With TX_LOOP set (kms_command_out): $C6 = the data is received as a KM
 //  message (magic compare included); other codes are sound, ignored.
+//
+//  Sound out (SND_Out_Handler snd.c:461-491, kms_sndout_request /
+//  kms_sndout_underrun kms.c:127-130, 239-246): while sound out is enabled,
+//  frames {L[15:0], R[15:0]} come from the PC chip's sound-out DMA channel
+//  (so_*) into a 256-frame queue; a 44.1 kHz tick (from the real clk_sys)
+//  plays one per tick (double-sample modes: one per two ticks, the second
+//  repeated or zero).  With the queue empty and the channel out of data,
+//  every 100 us: SNDOUT_DMA_UNDERRUN | SNDOUT_DMA_REQUEST and
+//  INT_SOUND_OVRUN (interrupt status bit 8).  Output: next_sound_output
+//  (de-emphasis, 2 dB attenuation steps, mute) -> audio_l / audio_r.
 //
 //  Magic keys (kms_km_receive, compared on (message & $7000FFFF)):
 //   $1000A825  L-cmd + L-alt + keypad *   -> reset_req (whole machine)
@@ -103,9 +129,7 @@
 //============================================================================
 
 module tc_kms #(
-	/* verilator lint_off UNUSEDPARAM */
-	parameter CLK_HZ = 33000000       // SOUND HOOK: for the 44.1 kHz engine
-	/* verilator lint_on UNUSEDPARAM */
+	parameter CLK_HZ = 33000000       // the real clk frequency: 44.1 kHz tick, 1 us poll
 )(
 	input             clk,          // clk_sys 33 MHz
 	input             reset,        // synchronous, active high
@@ -125,7 +149,15 @@ module tc_kms #(
 	output            nmi,          // -> interrupt status bit 31 (INT_NMI)
 	output            power_key,    // 1-cycle pulse on a power key press -> RTC
 	output            reset_req,    // 1-cycle pulse: KMS_MAGIC_RESET -> machine reset
-	output      [7:0] dbg_cmd       // last command byte written
+	output      [7:0] dbg_cmd,      // last command byte written
+	// sound out: the PC chip's sound-out DMA channel (tc_tdma so_*)
+	output            so_req,       // level: a frame is wanted (held until so_ack)
+	input             so_ack,       // pulse: so_rdata is the next frame
+	input      [31:0] so_rdata,     // {L[15:0], R[15:0]}
+	input             so_avail,     // the channel has data (ENABLE, Next < Limit)
+	output            int_snd_ovrun,// -> interrupt status bit 8 (INT_SOUND_OVRUN)
+	output signed [15:0] audio_l,   // signed 16-bit, new value per 44.1 kHz tick
+	output signed [15:0] audio_r
 );
 
 // $0200E001 bits
@@ -368,6 +400,11 @@ wire [31:0] data_w = {be[3] ? wdata[31:24] : kms_data[31:24],
 reg  [7:0] st_km_n, st_cmd_n, cmd_n;
 reg  [1:0] st_tx_n;
 reg [31:0] kms_data_n, kmdata_n, km_mask_n, rdata_n;
+// to the sound side (below), all for this cycle only
+reg        snd_ctrl_we;   // $0200E000 byte 0 written (KMS_Ctrl_Snd_Write), value wdata[31:24]
+reg        snd_kreset;    // kms_reset(): snd_stop_output / snd_stop_input
+reg        snd_cmd;       // kms_command_in with cmd / data_w (the sound codes)
+reg  [7:0] st_snd;        // $0200E000 byte 0 (the sound side's state)
 reg  [6:0] mods_n;
 reg  [1:0] ctrl_down_n;
 reg        capslock_n, caps_down_n, key_tgl_n, mouse_tgl_n, power_n, reset_req_n;
@@ -387,11 +424,12 @@ always_comb begin
 	key_tgl_n   = key_tgl;   mouse_tgl_n = mouse_tgl;
 	power_n     = 1'b0;      reset_req_n = 1'b0;
 	post        = 1'b0;      post_ovr    = 1'b0;      post_data = 32'd0;
+	snd_ctrl_we = 1'b0;      snd_kreset  = 1'b0;      snd_cmd   = 1'b0;
 	kb_mb = 7'd0; kb_mods = 7'd0; kb_kc = 7'd0; kb_ctrl = 2'd0;
 	kb_caps_ev = 1'b0; kb_caps = 1'b0;
 
 	case (addr)
-	2'd0:    rdata_n = {8'h00, st_km, 6'd0, st_tx, st_cmd};   // SOUND HOOK: byte 0
+	2'd0:    rdata_n = {st_snd, st_km, 6'd0, st_tx, st_cmd};
 	2'd1:    rdata_n = kms_data;
 	2'd2:    rdata_n = kmdata;
 	default: rdata_n = 32'd0;
@@ -401,9 +439,8 @@ always_comb begin
 		if (we) begin
 			case (addr)
 			2'd0: begin
-				// be[3] $0200E000 sound control (KMS_Ctrl_Snd_Write).  SOUND HOOK:
-				// SNDOUT/SNDIN_DMA_ENABLE r/w, a 1 in bit 5 / bit 1 clears the
-				// underrun / overrun (and INT_SOUND_OVRUN) when that side is idle.
+				// be[3] $0200E000 sound control (KMS_Ctrl_Snd_Write), below
+				snd_ctrl_we = be[3];
 				if (be[2]) begin                       // KMS_Ctrl_KM_Write
 					if (wdata[21]) st_km_n = st_km_n & ~(KM_RECEIVED | KM_OVERRUN | KM_INT);
 					if (wdata[20]) st_km_n = st_km_n & ~NMI_RECEIVED;
@@ -413,7 +450,7 @@ always_comb begin
 					if (st_tx[1] && !wdata[9]) begin   // KMS_ENABLE 1 -> 0: kms_reset()
 						st_km_n = 8'd0; st_cmd_n = 8'd0; cmd_n = 8'd0;
 						kms_data_n = 32'd0; kmdata_n = 32'd0; km_mask_n = 32'd0;
-						// SOUND HOOK: snd_stop_output / snd_stop_input
+						snd_kreset = 1'b1;
 					end
 					st_tx_n = wdata[9:8];
 				end
@@ -423,8 +460,8 @@ always_comb begin
 				kms_data_n = data_w;
 				if (be[0] && km_enable) begin
 					if (st_tx[0]) begin
-						// TX_LOOP: kms_command_out.  SOUND HOOK: $07 SO_REQ,
-						// $0F SO_UNDR, $C7 CODEC_IN are sound messages.
+						// TX_LOOP: kms_command_out.  $07 SO_REQ, $0F SO_UNDR,
+						// $C7 CODEC_IN are sound box messages: not looped here.
 						if (cmd == KMSCMD_KM_RECV) begin
 							post = 1'b1;
 							post_data = data_w;
@@ -435,7 +472,7 @@ always_comb begin
 						if (data_w == 32'hFFFFFFFF) begin
 							st_km_n = 8'd0; st_tx_n = 2'd0; st_cmd_n = 8'd0; cmd_n = 8'd0;
 							kms_data_n = 32'd0; kmdata_n = 32'd0; km_mask_n = 32'd0;
-							// SOUND HOOK: snd_stop_output / snd_stop_input
+							snd_kreset = 1'b1;
 						end
 					KMSCMD_KMPOLL:
 						km_mask_n = data_w;
@@ -453,10 +490,9 @@ always_comb begin
 						// $EF set address: REV_NEW keeps address 0.  Writes
 						// (keyboard LEDs, the ROM's $C5 $30000 / $C5 0): no-response.
 					end
-					// SOUND HOOK: $C7 ASNDOUT (snd_send_sample), $C4 CTRLOUT
-					// (snd_gpo_access), $C2 VOLCTRL (REV_NEW: snd_vol_access),
-					// (cmd & $C7) == $07 sound out / $03 sound in enable/disable.
-					default: ;
+					// $C4 CTRLOUT, $C2 VOLCTRL (REV_NEW), (cmd & $C7) == $07
+					// sound out / $03 sound in, $C7 ASNDOUT: the sound side
+					default: snd_cmd = 1'b1;
 					endcase
 				end
 			end
@@ -546,6 +582,198 @@ always_ff @(posedge clk) begin
 		power_pulse <= power_n; reset_pulse <= reset_req_n;
 		ack <= stb;
 		if (stb) rdata <= rdata_n;
+	end
+end
+
+//----------------------------------------------------------------------------
+// sound out: the sound box (the mono core's next_kms_snd.sv engine; its DMA
+// channel is tc_tdma's, reached through so_*)
+//----------------------------------------------------------------------------
+
+localparam [7:0] SNDOUT_DMA_ENABLE   = 8'h80, SNDOUT_DMA_REQUEST = 8'h40,
+                 SNDOUT_DMA_UNDERRUN = 8'h20, SNDIN_DMA_ENABLE   = 8'h08;   // kms.c:79-84
+
+reg        sndout_active;     // snd_output_active()
+reg        snd_underrun;      // INT_SOUND_OVRUN
+reg  [1:0] sndout_mode;       // command bits 5:4: [0] double sample, [1] by zero fill
+reg        repeat_phase;      // double sample: the second tick of a frame
+reg [31:0] repeat_frame;
+reg  [5:0] attenuation_l, attenuation_r;
+reg  [4:0] volume_bits;       // the serial volume interface (snd_shift_volume_reg)
+reg [10:0] volume_shift;
+reg  [7:0] gpo;               // snd_gpo_access: 4 mute, 3 de-emphasis, 2 clock, 1 data, 0 strobe
+reg [15:0] poll;              // us until the next underrun report
+/* verilator lint_off UNUSEDSIGNAL */
+wire unused_gpo = &{1'b0, gpo[7:5], gpo[1]};   // the data bit is sampled from the command
+/* verilator lint_on UNUSEDSIGNAL */
+
+assign int_snd_ovrun = snd_underrun;
+
+// 1 us tick (the underrun poll) and the 44.1 kHz sample tick, both from the
+// real clock (fractional divider: add the rate, tick and subtract at CLK_HZ)
+localparam US_DIV = CLK_HZ / 1000000;
+localparam integer US_W = $clog2(US_DIV);
+localparam [US_W-1:0] US_LAST = US_W'(US_DIV - 1);
+reg  [US_W-1:0] uspresc;
+wire        us_tick     = (uspresc == US_LAST);
+localparam [31:0] AUDIO_SR = 32'd44100;
+reg  [31:0] sr_acc;
+wire [32:0] sr_sum      = {1'b0, sr_acc} + {1'b0, AUDIO_SR};
+wire        sample_tick = (sr_sum >= CLK_HZ);
+
+// the frame queue (block RAM, registered read)
+localparam AF_DEPTH = 256;
+reg [31:0] afifo [0:AF_DEPTH-1];
+reg  [7:0] af_wr, af_rd;
+reg  [8:0] af_cnt;
+reg [31:0] af_q;               // afifo[af_rd] of the previous clock
+wire       af_empty = (af_cnt == 9'd0);
+
+wire snd_out_cmd  = snd_cmd && ((cmd & 8'hC7) == 8'h07);
+// a KMS reset, or a start from stopped, empties the queue (the mono core's
+// output_flush); an ordinary stop lets the queued frames play out
+wire output_flush = snd_kreset || (snd_out_cmd && cmd[3] && !sndout_active);
+wire af_push      = so_ack && !output_flush;
+wire af_pop       = sample_tick && !af_empty && (!sndout_mode[0] || !repeat_phase) && !output_flush;
+// one frame may be in flight: ask while two places are free
+assign so_req     = sndout_active && !output_flush && (af_cnt < AF_DEPTH - 1);
+
+always_ff @(posedge clk) begin
+	if (af_push) afifo[af_wr] <= so_rdata;
+	af_q <= afifo[af_rd];
+end
+
+// the frame of each tick, one clock later: 1 = queue, 2 = repeat, 0 = silence
+reg        tick_d;
+reg  [1:0] src_d;
+wire [31:0] out_frame = (src_d == 2'd1) ? af_q : (src_d == 2'd2) ? repeat_frame : 32'd0;
+
+next_sound_output output_processing (
+	.clk(clk), .reset(reset || output_flush),
+	.sample_strobe(tick_d), .frame(out_frame),
+	.mute(gpo[4]), .deemphasis(gpo[3]),
+	.attenuation_l(attenuation_l), .attenuation_r(attenuation_r),
+	.audio_l(audio_l), .audio_r(audio_r)
+);
+
+// snd_vol_access / snd_save_volume_reg: bit 6 left, bit 7 right, 43 = mute
+task automatic set_volume;
+	input [7:0] value;
+	begin
+		if (value[6]) attenuation_l <= (value[5:0] > 6'd43) ? 6'd43 : value[5:0];
+		if (value[7]) attenuation_r <= (value[5:0] > 6'd43) ? 6'd43 : value[5:0];
+	end
+endtask
+
+always_ff @(posedge clk) begin
+	if (reset) begin
+		st_snd <= 8'd0;
+		sndout_active <= 1'b0; snd_underrun <= 1'b0; sndout_mode <= 2'd0;
+		repeat_phase <= 1'b0; repeat_frame <= 32'd0;
+		attenuation_l <= 6'd0; attenuation_r <= 6'd0;
+		volume_bits <= 5'd0; volume_shift <= 11'd0; gpo <= 8'd0;
+		poll <= 16'd0; uspresc <= '0; sr_acc <= 32'd0;
+		af_wr <= 8'd0; af_rd <= 8'd0; af_cnt <= 9'd0;
+		tick_d <= 1'b0; src_d <= 2'd0;
+	end
+	else begin
+		uspresc <= us_tick ? '0 : uspresc + 1'd1;
+		sr_acc  <= sample_tick ? (sr_sum[31:0] - CLK_HZ) : sr_sum[31:0];
+
+		// the queue and the tick
+		tick_d <= sample_tick;
+		src_d  <= af_pop ? 2'd1 :
+		          (sndout_mode[0] && repeat_phase && !sndout_mode[1]) ? 2'd2 : 2'd0;
+		if (tick_d && src_d == 2'd1) repeat_frame <= af_q;
+		if (sample_tick) begin
+			if (!sndout_mode[0])  repeat_phase <= 1'b0;
+			else if (repeat_phase) repeat_phase <= 1'b0;
+			else if (af_pop)       repeat_phase <= 1'b1;
+		end
+		if (af_push) af_wr <= af_wr + 8'd1;
+		if (af_pop)  af_rd <= af_rd + 8'd1;
+		case ({af_push, af_pop})
+		2'b10:   af_cnt <= af_cnt + 9'd1;
+		2'b01:   af_cnt <= af_cnt - 9'd1;
+		default: ;
+		endcase
+
+		// underrun: kms_sndout_underrun once the queue is empty and the
+		// channel has no data (SND_Out_Handler), again every 100 us
+		if (sndout_active && !output_flush && !so_avail && !so_ack &&
+		    af_empty && !repeat_phase && us_tick) begin
+			if (poll != 16'd0) poll <= poll - 16'd1;
+			else begin
+				st_snd <= st_snd | SNDOUT_DMA_UNDERRUN | SNDOUT_DMA_REQUEST;
+				snd_underrun <= 1'b1;
+				poll <= 16'd100;
+			end
+		end
+
+		// KMS_Ctrl_Snd_Write (kms.c:639-653)
+		if (snd_ctrl_we) begin
+			if (wdata[29] && !sndout_active) begin
+				st_snd <= ((st_snd & ~(SNDOUT_DMA_ENABLE | SNDIN_DMA_ENABLE)) |
+				           (wdata[31:24] & (SNDOUT_DMA_ENABLE | SNDIN_DMA_ENABLE))) &
+				          ~(SNDOUT_DMA_UNDERRUN | SNDOUT_DMA_REQUEST);
+				snd_underrun <= 1'b0;
+			end
+			else
+				st_snd <= (st_snd & ~(SNDOUT_DMA_ENABLE | SNDIN_DMA_ENABLE)) |
+				          (wdata[31:24] & (SNDOUT_DMA_ENABLE | SNDIN_DMA_ENABLE));
+		end
+
+		// the sound commands of kms_command_in (kms.c:556-631)
+		if (snd_cmd) begin
+			if (cmd == 8'hC4) begin
+				// KMSCMD_CTRLOUT: snd_gpo_access (snd.c:280-298)
+				gpo <= data_w[31:24];
+				if (data_w[24]) begin                              // strobe: save
+					if (volume_bits == 5'd11 && volume_shift[10:8] == 3'b111)
+						set_volume(volume_shift[7:0]);
+				end
+				else if (gpo[0]) begin                             // strobe fell: reset
+					volume_bits <= 5'd0;
+					volume_shift <= 11'd0;
+				end
+				else if (data_w[26] && !gpo[2]) begin              // clock rose: shift
+					volume_shift <= {volume_shift[9:0], data_w[25]};
+					if (volume_bits != 5'd31) volume_bits <= volume_bits + 5'd1;
+				end
+			end
+			else if (cmd == 8'hC2) begin
+				// KMSCMD_VOLCTRL, REV_NEW: snd_vol_access (snd.c:263-270)
+				set_volume(data_w[31:24]);
+				volume_bits <= 5'd0;
+				volume_shift <= 11'd0;
+			end
+			else if ((cmd & 8'hC7) == 8'h07) begin
+				if (cmd[3]) begin                                  // snd_start_output
+					sndout_active <= 1'b1;
+					sndout_mode   <= cmd[5:4];
+					repeat_phase  <= 1'b0;
+					poll          <= 16'd0;   // SND_Out_Handler runs 1 us after the start
+				end
+				else begin                                         // snd_stop_output
+					sndout_active <= 1'b0;
+					st_snd <= st_snd & ~(SNDOUT_DMA_UNDERRUN | SNDOUT_DMA_REQUEST);
+					snd_underrun <= 1'b0;
+				end
+			end
+			// ($C7 & $C7) == $03 sound in and $C7 ASNDOUT: nothing on this core
+		end
+
+		if (output_flush) begin
+			af_wr <= 8'd0; af_rd <= 8'd0; af_cnt <= 9'd0;
+			repeat_phase <= 1'b0; repeat_frame <= 32'd0;
+			src_d <= 2'd0;
+		end
+		// kms_reset (kms.c:533-548): last, it wins; the volume stays
+		if (snd_kreset) begin
+			st_snd <= 8'd0;
+			sndout_active <= 1'b0; snd_underrun <= 1'b0; sndout_mode <= 2'd0;
+			poll <= 16'd0;
+		end
 	end
 end
 

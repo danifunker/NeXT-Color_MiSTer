@@ -54,8 +54,90 @@ logic [10:0] ps2_key = 11'd0;
 logic [24:0] ps2_mouse = 25'd0;
 wire         int_keymouse, nmi, power_key, reset_req;
 wire   [7:0] dbg_cmd;
+// sound out: a model of tc_tdma's sound-out channel (below)
+wire         so_req, int_snd_ovrun;
+logic        so_ack = 1'b0;
+logic [31:0] so_rdata = 32'd0;
+int          src_n = 0;                  // frames left in the channel's buffer
+int          src_i = 0;                  // number of the next frame
+wire         so_avail = (src_n > 0);
+wire signed [15:0] audio_l, audio_r;
 
 tc_kms #(.CLK_HZ(33000000)) dut (.*);
+
+// frame i = {L, R} = {i*100+1, -(i*100+1)}
+function automatic [31:0] frame(input int i);
+	logic [15:0] v;
+	v = 16'(i * 100 + 1);
+	frame = {v, -v};
+endfunction
+
+function automatic logic signed [15:0] fl(input int i);
+	logic [31:0] w;
+	w = frame(i);
+	fl = w[31:16];
+endfunction
+function automatic logic signed [15:0] fr(input int i);
+	logic [31:0] w;
+	w = frame(i);
+	fr = w[15:0];
+endfunction
+
+// the channel answers a request 3 clocks later (a word it cannot deliver
+// because the request went away is dropped, as tc_tdma's orphan)
+int so_wait = 0;
+always @(posedge clk) begin
+	so_ack <= 1'b0;
+	if (so_wait > 0) begin
+		so_wait <= so_wait - 1;
+		if (so_wait == 1 && so_req) begin
+			so_ack   <= 1'b1;
+			so_rdata <= frame(src_i);
+			src_i    <= src_i + 1;
+			src_n    <= src_n - 1;
+		end
+	end
+	else if (so_req && !so_ack && src_n > 0) so_wait <= 3;
+end
+
+// the output samples: 5 clocks after each tick of the sound box (the
+// frame is picked one clock after the tick, next_sound_output has 3 stages)
+bit rec = 1'b0;
+logic signed [15:0] out_l [$];
+logic signed [15:0] out_r [$];
+logic [4:0] tk = 5'd0;
+always @(posedge clk) begin
+	tk <= {tk[3:0], dut.tick_d};
+	if (tk[4] && rec) begin
+		out_l.push_back(audio_l);
+		out_r.push_back(audio_r);
+	end
+end
+
+task automatic record(input int n);
+	out_l.delete();
+	out_r.delete();
+	rec = 1'b1;
+	while (out_l.size() < n) @(negedge clk);
+	rec = 1'b0;
+endtask
+
+// next_sound_output: x * gain / 65536, rounded half away from zero
+function automatic logic signed [15:0] att(input logic signed [15:0] x, input int gain);
+	longint p;
+	p = longint'(x) * gain;
+	att = 16'((p < 0) ? -((-p + 32768) >>> 16) : ((p + 32768) >>> 16));
+endfunction
+
+// index of the first non-silent sample (the first tick may come before the
+// first frame has arrived)
+function automatic int first_sound();
+	first_sound = -1;
+	foreach (out_l[k]) if (out_l[k] != 0) begin
+		first_sound = k;
+		break;
+	end
+endfunction
 
 int errors = 0, checks = 0;
 int power_cycles = 0, reset_cycles = 0;
@@ -404,19 +486,17 @@ initial begin : test
 	rd32(R_DATA, q);   check(q == 32'hEF000000, $sformatf("$0200E004 reads %08x", q));
 	rd32(R_KMDATA, q); check(q == 32'h70000000, "merged $C5 $EF000000 answered");
 
-	// --- sound: status 0, commands accepted and ignored ----------------------
-	wr8(R_SND, 8'h80);
-	rd8(R_SND, b);     check(b == 8'h00, "sound status byte reads 0");
-	rom_send_cmd(8'h07, 32'd0);          // sound out off
-	rom_send_cmd(8'h0F, 32'd0);          // sound out on
-	rom_send_cmd(8'h3F, 32'd0);          // on, double sample, zero fill
-	rom_send_cmd(8'h0B, 32'd0);          // sound in on
+	// --- sound: the status byte, commands without a KM message --------------
+	// (sound out itself: the "sound out" section below)
+	wr8(R_SND, 8'h88);
+	rd8(R_SND, b);     check(b == 8'h88, "sound status: SNDOUT/SNDIN_DMA_ENABLE r/w");
+	wr8(R_SND, 8'h00);
+	rom_send_cmd(8'h0B, 32'd0);          // sound in on: no CODEC, nothing happens
 	rom_send_cmd(8'h03, 32'd0);          // sound in off
-	rom_send_cmd(8'hC4, 32'h0E000000);   // CTRLOUT (kms_set_volume)
-	rom_send_cmd(8'hC2, 32'h40000000);   // VOLCTRL
-	rom_send_cmd(8'hC7, 32'h12345678);   // analog sound out
+	rom_send_cmd(8'hC7, 32'h12345678);   // analog sound out: ignored
 	rd32(R_SND, q);    check(q == 32'h0000_02C6,
 	                         $sformatf("sound status 0, no KM message: %08x", q));
+	check(!so_req && !int_snd_ovrun, "sound in / analog out start nothing");
 	expect_none("after sound commands");
 
 	// --- KMS_ENABLE 1->0 resets the KMS; disabled KMS drops events ----------
@@ -445,6 +525,129 @@ initial begin : test
 	key(0, PS2_KPSTAR, 0); expect_ev(kev(MOD_LCMD | MOD_LALT, 1, NK_KP_MULTIPLY), "keypad * break");
 	key(0, PS2_ALT, 0);    expect_ev(kev(MOD_LCMD, 1, 7'h00), "L-Alt break");
 	key(1, PS2_LWIN, 0);   expect_ev(kev(0, 1, 7'h00), "L-Win break");
+
+	// --- sound out (kms.c kms_command_in, snd.c SND_Out_Handler) -------------
+	begin : sound
+		int f, k;
+		bit ok;
+		rd8(R_SND, b);
+		check(b == 8'h00 && !int_snd_ovrun, "sound: stopped, status 0");
+		rom_send_cmd(8'hC2, 32'hC0000000);        // VOLCTRL: both channels 0 dB
+
+		// normal: 8 frames in the channel, sound out enable $0F
+		src_i = 0; src_n = 8;
+		fork
+			record(14);
+			rom_send_cmd(8'h0F, 32'd0);
+		join
+		f = first_sound();
+		check(f >= 0 && f <= 1, $sformatf("sound: playback starts at the first ticks (%0d)", f));
+		ok = (f >= 0);
+		for (k = 0; k < 8 && ok; k++)
+			ok = (out_l[f + k] == fl(k)) && (out_r[f + k] == fr(k));
+		check(ok, "sound: frames 0..7 play in order, left and right");
+		ok = 1'b1;
+		for (k = f + 8; k < 14; k++) ok = ok && out_l[k] == 0 && out_r[k] == 0;
+		check(ok, "sound: silence after the buffer");
+		check(src_n == 0 && src_i == 8, "sound: the channel gave exactly its 8 frames");
+
+		// underrun: the queue is empty and the channel has nothing
+		repeat (200) @(negedge clk);
+		rd8(R_SND, b);
+		check(b == 8'h60 && int_snd_ovrun, $sformatf("sound: underrun + request, INT_SOUND_OVRUN (%02x)", b));
+		wr8(R_SND, 8'h20);                        // while sound out runs: no effect
+		rd8(R_SND, b);
+		check(b == 8'h60 && int_snd_ovrun, "sound: underrun stays while sound out runs");
+		rom_send_cmd(8'h07, 32'd0);               // sound out disable
+		rd8(R_SND, b);
+		check(b == 8'h00 && !int_snd_ovrun, "sound: disable clears underrun / request / interrupt");
+		wr8(R_SND, 8'h80);                        // SNDOUT_DMA_ENABLE r/w
+		rd8(R_SND, b);
+		check(b == 8'h80, "sound: SNDOUT_DMA_ENABLE reads back");
+		wr8(R_SND, 8'h00);
+
+		// double sample by repetition ($1F): f0 f0 f1 f1 ...
+		src_i = 0; src_n = 4;
+		fork
+			record(12);
+			rom_send_cmd(8'h1F, 32'd0);
+		join
+		f = first_sound();
+		ok = (f >= 0 && f <= 1);
+		for (k = 0; k < 8 && ok; k++)
+			ok = out_l[f + k] == fl(k / 2);
+		check(ok, "sound: double sample by repetition");
+		rom_send_cmd(8'h07, 32'd0);
+
+		// double sample by zero fill ($3F): f0 0 f1 0 ...
+		src_i = 0; src_n = 4;
+		fork
+			record(12);
+			rom_send_cmd(8'h3F, 32'd0);
+		join
+		f = first_sound();
+		ok = (f >= 0 && f <= 1);
+		for (k = 0; k < 8 && ok; k++)
+			ok = out_l[f + k] == ((k % 2) ? 16'sd0 : fl(k / 2));
+		check(ok, "sound: double sample by zero fill");
+		rom_send_cmd(8'h07, 32'd0);
+
+		// volume: VOLCTRL left -6 dB (3), right -20 dB (10); gains of snd.c
+		rom_send_cmd(8'hC2, 32'h43000000);
+		rom_send_cmd(8'hC2, 32'h8A000000);
+		src_i = 5; src_n = 4;
+		fork
+			record(6);
+			rom_send_cmd(8'h0F, 32'd0);
+		join
+		f = first_sound();
+		check(f >= 0 && out_l[f] == att(fl(5), 32846) &&
+		      out_r[f] == att(fr(5), 6554),
+		      $sformatf("sound: attenuation L %0d R %0d", f >= 0 ? out_l[f] : 0, f >= 0 ? out_r[f] : 0));
+		rom_send_cmd(8'h07, 32'd0);
+
+		// the serial volume interface ($C4): 111 01 000000 -> left 0 dB
+		rom_send_cmd(8'hC4, 32'h00000000);
+		for (k = 10; k >= 0; k--) begin
+			bit d;
+			d = (11'b111_01_000000 >> k) & 1;
+			rom_send_cmd(8'hC4, {5'd0, 1'b0, d, 1'b0, 24'd0});   // clock low, data
+			rom_send_cmd(8'hC4, {5'd0, 1'b1, d, 1'b0, 24'd0});   // clock rises
+		end
+		rom_send_cmd(8'hC4, 32'h01000000);          // strobe: save
+		rom_send_cmd(8'hC4, 32'h00000000);
+		// and mute ($C4 bit 28)
+		src_i = 5; src_n = 4;
+		fork
+			record(6);
+			rom_send_cmd(8'h0F, 32'd0);
+		join
+		f = first_sound();
+		check(f >= 0 && out_l[f] == fl(5) &&
+		      out_r[f] == att(fr(5), 6554),
+		      "sound: serial volume interface sets the left channel only");
+		rom_send_cmd(8'h07, 32'd0);
+		rom_send_cmd(8'hC4, 32'h10000000);          // mute
+		src_i = 5; src_n = 4;
+		fork
+			record(6);
+			rom_send_cmd(8'h0F, 32'd0);
+		join
+		check(first_sound() == -1, "sound: mute");
+		rom_send_cmd(8'h07, 32'd0);
+		rom_send_cmd(8'hC4, 32'h00000000);
+
+		// KMS reset ($FF $FFFFFFFF) stops sound out
+		src_i = 0; src_n = 0;
+		rom_send_cmd(8'h0F, 32'd0);
+		repeat (100) @(negedge clk);
+		check(int_snd_ovrun, "sound: an empty start reports the underrun at once");
+		rom_send_cmd(8'hFF, 32'hFFFFFFFF);
+		rd8(R_SND, b);
+		check(b == 8'h00 && !int_snd_ovrun && !so_req, "sound: KMS reset stops sound out");
+		ori8(R_TX, 8'h02);                          // KMS_ENABLE again for the rest
+		rom_send_cmd(8'hC6, 32'h01FFFFF6);
+	end
 
 	// --- kms_send_reset ($01009860) ---------------------------------------------
 	rom_send_cmd(8'hC6, 32'h1000A825);   // without TX_LOOP: just a poll mask

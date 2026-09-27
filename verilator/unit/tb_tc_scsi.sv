@@ -94,6 +94,17 @@ wire  [31:0] ch_wdata, ch_rdata;
 wire         ch_enable, ch_dev2m, ch_room, ch_at_limit, ch_bufreset;
 wire   [3:0] ch_bufofs;
 
+// the sound-out channel's client (tc_kms in the machine)
+logic        so_req = 0;
+wire         so_ack, so_avail;
+wire  [31:0] so_rdata;
+int          so_words = 0;
+logic [31:0] so_got [$];
+always @(posedge clk) if (so_ack) begin
+	so_words++;
+	so_got.push_back(so_rdata);
+end
+
 wire         int_scsi, int_scsi_dma;
 wire         int_snd_out_dma, int_snd_in_dma, int_printer_dma, int_dsp_dma,
              int_en_tx_dma, int_en_rx_dma;
@@ -135,6 +146,11 @@ tc_tdma dma (
 	.sc_ack(ch_ack), .sc_rdata(ch_rdata), .sc_err(ch_err),
 	.sc_enable(ch_enable), .sc_dev2m(ch_dev2m), .sc_room(ch_room), .sc_at_limit(ch_at_limit),
 	.sc_bufreset(ch_bufreset), .sc_bufofs(ch_bufofs),
+	.et_req(1'b0), .et_ack(), .et_rdata(), .et_n(), .et_err(), .et_enable(), .et_room(),
+	.et_done(1'b0),
+	.er_req(1'b0), .er_wdata(32'd0), .er_n(3'd0), .er_ack(), .er_err(), .er_enable(),
+	.er_room(), .er_eof(1'b0), .er_full(1'b0), .er_nibble(),
+	.so_req(so_req), .so_ack(so_ack), .so_rdata(so_rdata), .so_avail(so_avail),
 	.int_scsi_dma(int_scsi_dma), .int_snd_out_dma(int_snd_out_dma),
 	.int_snd_in_dma(int_snd_in_dma), .int_printer_dma(int_printer_dma),
 	.int_dsp_dma(int_dsp_dma), .int_en_tx_dma(int_en_tx_dma), .int_en_rx_dma(int_en_rx_dma)
@@ -1407,6 +1423,89 @@ initial begin
 	check(v == 32'h1000_0000, $sformatf("after RESET the CSR keeps BUSEXC only: %08x", v));
 	csr_sticky = 32'h1000_0000;
 	read_and_check(9, 1);                      // BUSEXC stays (sticky) but data moves
+
+	//------------------------------------------------------------
+	// the sound-out channel ($02000040 / $02004040..C): frames for the
+	// sound box, two chained buffers (dma.c dma_sndout_read_memory /
+	// dma_interrupt)
+	//------------------------------------------------------------
+	$display("sound out channel");
+	begin : sndout
+		localparam logic [31:0] SBUF = 32'h0430_0000;
+		localparam logic [16:0] O_CSR = 17'h00040, O_NEXT = 17'h04040, O_LIMIT = 17'h04044,
+		                        O_START = 17'h04048, O_STOP = 17'h0404C, O_INIT = 17'h04240;
+		int k, n;
+		bit ok;
+		win_any = 1'b0;
+		for (k = 0; k < 12; k++) dram[(SBUF - DRAM_BASE) / 4 + k] = 32'h5000_0000 + k;
+		so_got.delete();
+		n = so_words;
+		tdma_w(O_CSR, 32'h0010_0000);              // RESET
+		tdma_w(O_NEXT, SBUF);
+		tdma_w(O_LIMIT, SBUF + 16);
+		tdma_w(O_START, SBUF + 16);
+		tdma_w(O_STOP, SBUF + 32);
+		check(!so_avail, "sound: a stopped channel has no data");
+		tdma_w(O_CSR, 32'h0003_0000);              // SETENABLE | SETSUPDATE
+		check(so_avail, "sound: enabled channel with Next < Limit has data");
+		so_req = 1'b1;
+		wait (so_words == n + 4);
+		so_req = 1'b0;
+		@(posedge clk);
+		tdma_r(O_CSR, v);
+		check(v == 32'h0900_0000, $sformatf("sound: first buffer done, chained: CSR %08x", v));
+		check(int_snd_out_dma, "sound: INT_SND_OUT_DMA with COMPLETE");
+		tdma_r(O_NEXT, v);
+		check(v == SBUF + 16, $sformatf("sound: Next %08x = Start after the chain", v));
+		tdma_w(O_CSR, 32'h0008_0000);              // CLRCOMPLETE (running channel)
+		check(!int_snd_out_dma, "sound: CLRCOMPLETE releases the interrupt");
+		so_req = 1'b1;
+		wait (so_words == n + 8);
+		repeat (20) @(posedge clk);
+		so_req = 1'b0;
+		check(so_words == n + 8, "sound: no word past the second buffer");
+		ok = (so_got.size() == 8);
+		for (k = 0; k < 8 && ok; k++) ok = (so_got[k] == 32'h5000_0000 + k);
+		check(ok, "sound: 8 frames in memory order across the chain");
+		tdma_r(O_CSR, v);
+		check(v == 32'h0800_0000, $sformatf("sound: all done: CSR %08x (COMPLETE, ENABLE off)", v));
+		check(!so_avail, "sound: no data after the last buffer");
+
+		// a request withdrawn while its word is in flight: dropped, Next stays
+		tdma_w(O_CSR, 32'h0010_0000);
+		tdma_w(O_INIT, SBUF + 32);                 // init = Next
+		tdma_w(O_LIMIT, SBUF + 48);
+		tdma_w(O_CSR, 32'h0001_0000);
+		n = so_words;
+		@(negedge clk); so_req = 1'b1;
+		wait (m_req);
+		@(negedge clk); so_req = 1'b0;
+		repeat (30) @(posedge clk);
+		check(so_words == n, "sound: withdrawn request delivers nothing");
+		tdma_r(O_NEXT, v);
+		check(v == SBUF + 32, $sformatf("sound: withdrawn request leaves Next at %08x", v));
+		// RESET while a word is in flight: dropped too
+		@(negedge clk); so_req = 1'b1;
+		wait (m_req);
+		tdma_w(O_CSR, 32'h0010_0000);
+		repeat (30) @(posedge clk);
+		so_req = 1'b0;
+		check(so_words == n, "sound: RESET drops the word in flight");
+		tdma_r(O_NEXT, v);
+		check(v == SBUF + 32, $sformatf("sound: RESET leaves Next at %08x", v));
+		// a bus error: COMPLETE | BUSEXC, ENABLE off
+		tdma_w(O_NEXT, 32'h0010_0000);             // not RAM
+		tdma_w(O_LIMIT, 32'h0010_0010);
+		tdma_w(O_CSR, 32'h0001_0000);
+		so_req = 1'b1;
+		repeat (40) @(posedge clk);
+		so_req = 1'b0;
+		tdma_r(O_CSR, v);
+		check(v == 32'h1800_0000, $sformatf("sound: bus error CSR %08x", v));
+		check(so_words == n, "sound: nothing delivered on a bus error");
+		tdma_w(O_CSR, 32'h0010_0000);
+		dma_errs = 0;
+	end
 
 	//------------------------------------------------------------
 	$display("DMA: %0d longwords written, %0d read; HPS: %0d sector reads, %0d writes, %0d window reads",
