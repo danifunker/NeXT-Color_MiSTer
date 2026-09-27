@@ -34,3 +34,5 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_enet.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_scc.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_tdma.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tc_scsi.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/next_floppy.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/next_floppy.sv

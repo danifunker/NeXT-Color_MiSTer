@@ -35,9 +35,8 @@
 //    * Device port: the tc_machine 32-bit port (stb, big-endian be, ack one
 //      clock later with rdata) replaces the 16-bit sel_* bus.  Every
 //      enabled byte lane is a register access (+n is lane 3 - (n & 3)).
-//    * The floppy's share of the channel (flp_*) is TIED OFF (the Turbo
-//      82077 is not modelled yet): see "FLOPPY TIE-OFF" below; the
-//      engine's floppy branches are kept for when it is.
+//    * The floppy's share of the channel (flp_*): next_scsi.sv's ports,
+//      wired to rtl/next_floppy.sv in tc_machine (see "FLOPPY" below).
 //    * sd_buff_addr is the full hps_io width [13:0]; the engine moves one
 //      block, so it uses [8:0] and ignores buffer strobes above 511 (the
 //      mono core lost multi-block transfers to a narrowed port once).
@@ -147,7 +146,18 @@ module tc_scsi #(
 	// sd_hold is high
 	output            sd_busy,
 	input             sd_hold,
-	output reg        cd_fwd_stb     // one clock: a CD transport command was forwarded
+	output reg        cd_fwd_stb,    // one clock: a CD transport command was forwarded
+	// the 82077 floppy's share of this channel (rtl/next_floppy.sv, as
+	// next_scsi.sv's flp_* ports): see "FLOPPY" below
+	input             flp_select,    // CTRL_82077: the channel belongs to the floppy
+	input             flp_req,       // a sector is ready / wanted
+	input             flp_wr,        // 1 = floppy to memory
+	input      [10:0] flp_len,       // bytes in the sector
+	output      [9:0] flp_addr,      // the floppy's sector buffer
+	output            flp_bwe,
+	output      [7:0] flp_bwdata,
+	input       [7:0] flp_bq,
+	output reg        flp_done       // the channel moved flp_len bytes
 );
 
 // an acknowledge on the shared slot belongs to the audio engine while it holds it
@@ -310,22 +320,11 @@ reg  [1:0] flush_left;          // words of the pump after the current one
 reg  [1:0] dma_irq_resume;      // 1: retained DI bytes, 2: retained DO bytes
 
 //----------------------------------------------------------------------------
-// FLOPPY TIE-OFF.  On NeXT hardware the 82077 shares this channel
-// (Previous dma.c:409-415, 534-539, floppy_select); next_scsi.sv had the
-// flp_* ports for it.  The Turbo floppy is not modelled yet, so the
-// requests are tied off here and the engine's floppy branches never run.
-// To attach a floppy, turn these wires back into next_scsi.sv's ports
-// (flp_select/flp_req/flp_wr/flp_len/flp_bq in, flp_addr = {1'b0, eng_addr},
-// flp_bwe = fdma & eng_we, flp_bwdata = eng_wd, flp_done out).
+// FLOPPY.  On NeXT hardware the 82077 shares this channel (Previous
+// dma.c:409-415, 534-539, floppy_select): while CTRL_82077 selects it, the
+// engine moves the floppy's sector buffer (rtl/next_floppy.sv) instead of
+// the ESP's, exactly as next_scsi.sv did.
 //----------------------------------------------------------------------------
-wire        flp_select = 1'b0;
-wire        flp_req    = 1'b0;
-wire        flp_wr     = 1'b0;
-wire [10:0] flp_len    = 11'd0;
-wire  [7:0] flp_bq     = 8'h00;
-/* verilator lint_off UNUSEDSIGNAL */
-reg         flp_done;           // tie-off: no floppy listens
-/* verilator lint_on UNUSEDSIGNAL */
 
 //----------------------------------------------------------------------------
 // data buffer: one 512 byte sector, also carries the command responses.
@@ -519,9 +518,11 @@ wire [8:0] db_addr = in_sd_rd ? sd_baddr :
 wire [7:0] db_wd   = in_sd_rd ? sd_buff_dout : eng_wd;
 
 // while the floppy owns the channel the engine addresses its buffer
-// (tie-off: never)
 wire fdma = flp_select & flp_active;
 wire [7:0] eng_q  = fdma ? flp_bq : db_q;
+assign flp_addr   = {1'b0, eng_addr};
+assign flp_bwe    = fdma & eng_we;
+assign flp_bwdata = eng_wd;
 
 always @(posedge clk) begin
 	if (db_we) dbuf[db_addr] <= db_wd;

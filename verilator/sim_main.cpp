@@ -80,6 +80,8 @@ static std::string opt_disk[2];                                  // --disk0 / --
 int64_t sim_disk_open(int slot, const char* path);
 extern "C" int host_mount_disk(int slot, long long bytes);
 static int64_t disk_bytes[2] = {0, 0};
+static std::string opt_floppy;                                  // --floppy image (SD slot 4)
+static int64_t floppy_bytes = 0;
 
 // ------------------------------------------------------------------ symbols
 static std::map<uint32_t, std::string> syms;
@@ -412,6 +414,10 @@ static void step_tick() {
 				top->img_mounted = 1 << s;
 				top->img_size = (uint64_t)disk_bytes[s];
 			}
+		if (floppy_bytes > 0 && cyc == 104) {
+			top->img_mounted = 1 << 4;
+			top->img_size = (uint64_t)floppy_bytes;
+		}
 		if (!top->reset) monitor();
 		keyboard_tick();
 #ifdef SIM_GUI
@@ -439,6 +445,7 @@ static void usage() {
 	       "  --type CYC:TEXT       type TEXT on the keyboard from cycle CYC ('|' = Return)\n"
 	       "  --disk0 FILE          SCSI target 0 image (SD slot 0; written back: use a copy)\n"
 	       "  --disk1 FILE          SCSI target 1 image (SD slot 1)\n"
+	       "  --floppy FILE         floppy image, 720K/1.44M/2.88M (SD slot 4; written back)\n"
 	       "  --color-bars CYC      sim-only: write colour bars into VRAM at cycle CYC\n");
 }
 
@@ -479,6 +486,7 @@ int main(int argc, char** argv) {
 		else if (a == "--boot") opt_boot = next();
 		else if (a == "--disk0") opt_disk[0] = next();
 		else if (a == "--disk1") opt_disk[1] = next();
+		else if (a == "--floppy") opt_floppy = next();
 		else if (a == "--type") {
 			std::string s = next();
 			size_t c = s.find(':');
@@ -525,6 +533,11 @@ int main(int argc, char** argv) {
 		host_mount_disk(s, disk_bytes[s]);
 		printf("[SIM] SCSI target %d: %s, %lld bytes (%lld blocks)\n", s, opt_disk[s].c_str(),
 		       (long long)disk_bytes[s], (long long)(disk_bytes[s] / 512));
+	}
+	if (!opt_floppy.empty()) {
+		floppy_bytes = sim_disk_open(4, opt_floppy.c_str());
+		if (floppy_bytes <= 0) { printf("[SIM] cannot open floppy image %s\n", opt_floppy.c_str()); return 1; }
+		printf("[SIM] floppy: %s, %lld bytes\n", opt_floppy.c_str(), (long long)floppy_bytes);
 	}
 
 	static const char* ram_names[4] = {"64 MB", "128 MB", "16 MB", "32 MB"};

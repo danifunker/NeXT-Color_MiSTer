@@ -108,6 +108,16 @@ module tc_machine
 	input             sd_buff_wr,
 	output            sd_busy,
 
+	// the floppy drive's image on its own SD slot (4, as the mono core):
+	// rtl/next_floppy.sv.  img_readonly/img_size and the sd_buff_* bus are
+	// shared with the SCSI slots; the floppy acts only on its own ack.
+	input             fimg_mounted,
+	output     [31:0] fsd_lba,
+	output            fsd_rd,
+	output            fsd_wr,
+	input             fsd_ack,
+	output      [7:0] fsd_buff_din,
+
 	output            led,
 	output            reset_req,          // KMS magic reset: the top resets the machine
 
@@ -368,6 +378,11 @@ wire        kms_power_key;
 wire        int_power, int_keymouse, int_timer, int_video, int_tmc_nmi, int_kms_nmi;
 wire        int_scsi, int_scsi_dma, int_snd_out_dma, int_snd_in_dma, int_printer_dma,
             int_dsp_dma, int_en_tx_dma, int_en_rx_dma, int_en_tx, int_en_rx;
+// the floppy (next_floppy, below) and its share of the SCSI DMA channel
+wire        int_floppy, flp_select, flp_req, flp_wr, flp_bwe, flp_done;
+wire [10:0] flp_len;
+wire  [9:0] flp_addr;
+wire  [7:0] flp_bwdata, flp_bq;
 wire  [1:0] softint;
 wire        timer_ipl7;
 wire [31:0] int_src = {int_tmc_nmi | int_kms_nmi,  // 31 INT_NMI
@@ -388,7 +403,9 @@ wire [31:0] int_src = {int_tmc_nmi | int_kms_nmi,  // 31 INT_NMI
                        1'b0,                       // 11 INT_PRINTER
                        int_en_tx,                  // 10 INT_EN_TX (tc_enet TX status & mask)
                        int_en_rx,                  // 9 INT_EN_RX (tc_enet RX status & mask)
-                       4'd0,                       // 8..5 (floppy 7: later)
+                       1'b0,                       // 8
+                       int_floppy,                 // 7 INT_PHONE = the 82077 (next_floppy)
+                       2'd0,                       // 6..5
                        1'b0,                       // 4
                        int_keymouse,               // 3 INT_KEYMOUSE
                        int_power,                  // 2 INT_POWER
@@ -522,7 +539,10 @@ tc_scsi #(.CLK_HZ(CLK_HZ)) esp (
 	.img_mounted(img_mounted), .img_readonly(img_readonly), .img_size(img_size),
 	.sd_unit(sd_unit), .sd_lba(sd_lba), .sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack_in(sd_ack),
 	.sd_buff_addr(sd_buff_addr), .sd_buff_dout(sd_buff_dout), .sd_buff_din(sd_buff_din),
-	.sd_buff_wr(sd_buff_wr), .sd_busy(sd_busy), .sd_hold(1'b0), .cd_fwd_stb()
+	.sd_buff_wr(sd_buff_wr), .sd_busy(sd_busy), .sd_hold(1'b0), .cd_fwd_stb(),
+	.flp_select(flp_select), .flp_req(flp_req), .flp_wr(flp_wr), .flp_len(flp_len),
+	.flp_addr(flp_addr), .flp_bwe(flp_bwe), .flp_bwdata(flp_bwdata), .flp_bq(flp_bq),
+	.flp_done(flp_done)
 );
 
 // AT&T 7213 Ethernet (HS 8): rtl/tc_enet.sv, internal loopback for the
@@ -546,15 +566,83 @@ tc_scc scc (
 	.a2(io_addr[2]), .be(io_be), .wdata(io_wdata),
 	.rdata(scc_rdata), .ack(scc_ack));
 
-// floppy: no drive.  $02114108 byte reads $04 ("no drive", HS 10 / 16.1
-// item 16); the 82077 registers read 0 and do not bus-error.
+// Floppy: the Intel 82077 + the NeXT external control register at
+// $02014100..$02014108 (HS 10; Previous floppy.c, ioMemTabTurbo.c:197-208):
+// rtl/next_floppy.sv, the mono core's controller, with the Turbo
+// NeXTstation colour ID bytes at +3/+6 (floppy.c:1307-1335).  Drive 0 is
+// always fitted (a 2.88 MB drive: 720K, 1.44M and 2.88M images); its
+// sector data moves through the SCSI DMA channel (tc_scsi flp_*) while
+// CTRL_82077 selects it.
+// The controller has next_system's 16-bit port (addr[3:1] word, be[1] the
+// even byte).  This bus is 32-bit with byte +n on lane 3 - (n & 3), so an
+// access is presented as its upper half (+0,+1: lanes 3,2), then its lower
+// half (+2,+3: lanes 1,0), one clock each, only for halves with enabled
+// lanes -- a FIFO read (+5) then pops once, as a byte access must.
+wire [15:0] fc_rdata;
+reg   [1:0] fc_st;                // 0 idle, 1 upper half, 2 lower half
+reg         fc_we;
+reg   [3:0] fc_be;
+reg   [1:0] fc_a;                 // io_addr[3:2]: the longword at +0, +4, +8
+reg  [31:0] fc_wd;
+wire        fc_lo = (fc_st == 2'd2);
+
+// next_floppy takes a mount only outside its reset (its medium block is the
+// else-branch of `if (reset)`), and a mount can arrive while the machine is
+// held there -- the sim mounts inside the reset window, as Main does at core
+// start, and OSD/KMS resets hold dev_rst.  Latch the mount with its size and
+// write protect (img_size/img_readonly are shared with the SCSI slots) and
+// hand it over on the first clock out of reset; tc_scsi likewise keeps its
+// mount state outside the reset.
+reg         fm_pend;
+reg  [31:0] fm_size;              // the drive takes images up to 2.88 MB
+reg         fm_ro;
+always @(posedge clk) begin
+	if (fimg_mounted) begin
+		fm_pend <= 1'b1; fm_size <= img_size[31:0]; fm_ro <= img_readonly;
+	end
+	else if (!dev_rst) fm_pend <= 1'b0;
+end
+wire        fm_go = fm_pend && !dev_rst;
+
+next_floppy #(.CLK_HZ(CLK_HZ), .RSV3(8'h03), .RSV6(8'hC0)) floppy (
+	.clk(clk), .reset(dev_rst),
+	.sel(fc_st != 2'd0), .addr({fc_a, fc_lo, 1'b0}), .we(fc_we),
+	.be(fc_lo ? fc_be[1:0] : fc_be[3:2]),
+	.wdata(fc_lo ? fc_wd[15:0] : fc_wd[31:16]),
+	.rdata(fc_rdata),
+	.int_floppy(int_floppy), .flp_select(flp_select),
+	.mo_gpo(1'b0),                // no optical drive on a NeXTstation
+	.buf_addr(flp_addr), .buf_we(flp_bwe), .buf_wdata(flp_bwdata), .buf_q(flp_bq),
+	.buf_len(flp_len), .dma_req(flp_req), .dma_wr(flp_wr), .dma_done(flp_done),
+	.img_mounted({1'b0, fm_go}), .img_readonly(fm_ro), .img_size({32'd0, fm_size}),
+	.sd_unit(), .sd_lba(fsd_lba), .sd_rd(fsd_rd), .sd_wr(fsd_wr), .sd_ack(fsd_ack),
+	.sd_buff_addr(sd_buff_addr[8:0]), .sd_buff_dout(sd_buff_dout),
+	.sd_buff_din(fsd_buff_din), .sd_buff_wr(sd_buff_wr)
+);
+
 reg        flp_ack;
 reg [31:0] flp_rdata;
 reg        zero_ack;
 always @(posedge clk) begin
-	flp_ack  <= io_stb && io_dev == D_FLP && !io_tmc;
+	flp_ack  <= 0;
 	zero_ack <= io_stb && io_dev == D_ZERO && !io_tmc;
-	if (io_stb) flp_rdata <= (io_addr[3:2] == 2'd2) ? 32'h0400_0000 : 32'd0;
+	case (fc_st)
+	2'd0: if (io_stb && io_dev == D_FLP && !io_tmc) begin
+		fc_we <= io_we; fc_be <= io_be; fc_a <= io_addr[3:2]; fc_wd <= io_wdata;
+		flp_rdata <= 32'd0;
+		fc_st <= (io_be[3:2] != 2'b00) ? 2'd1 : 2'd2;
+	end
+	2'd1: begin
+		flp_rdata[31:16] <= fc_rdata;
+		if (fc_be[1:0] != 2'b00) fc_st <= 2'd2;
+		else begin fc_st <= 2'd0; flp_ack <= 1; end
+	end
+	default: begin
+		flp_rdata[15:0] <= fc_rdata;
+		fc_st <= 2'd0; flp_ack <= 1;
+	end
+	endcase
+	if (dev_rst) fc_st <= 2'd0;
 end
 
 wire        io_ack   = tmc_ack | scr_ack | intc_ack | tim_ack | dac_ack | kms_ack |

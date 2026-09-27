@@ -131,11 +131,19 @@ end endgenerate
 wire  [2:0] sd_unit;
 wire [31:0] sd_lba;
 wire        sd_rd, sd_wr;
-reg         sd_ack = 0;
 reg  [13:0] sd_buff_addr = 0;
 reg   [7:0] sd_buff_dout = 0;
 wire  [7:0] sd_buff_din;
 reg         sd_buff_wr = 0;
+// the floppy's slot 4 (next_floppy): its own request, served by the same
+// model; the SCSI engine sees sd_ack only for its own transfers
+wire [31:0] fsd_lba;
+wire        fsd_rd, fsd_wr;
+wire  [7:0] fsd_buff_din;
+reg         m_ack = 0;          // the model's acknowledge
+reg         m_flp = 0;          // ... and it serves the floppy
+wire        sd_ack  = m_ack & ~m_flp;
+wire        fsd_ack = m_ack &  m_flp;
 
 tc_machine machine
 (
@@ -178,7 +186,7 @@ tc_machine machine
 	.pot_on(pot_on),
 	.boot_cmd(boot_cmd),
 
-	.img_mounted(img_mounted),
+	.img_mounted({2'b00, img_mounted[3:0]}),
 	.img_readonly(img_readonly),
 	.img_size(img_size),
 	.sd_unit(sd_unit),
@@ -191,6 +199,12 @@ tc_machine machine
 	.sd_buff_din(sd_buff_din),
 	.sd_buff_wr(sd_buff_wr),
 	.sd_busy(sd_busy),
+	.fimg_mounted(img_mounted[4]),
+	.fsd_lba(fsd_lba),
+	.fsd_rd(fsd_rd),
+	.fsd_wr(fsd_wr),
+	.fsd_ack(fsd_ack),
+	.fsd_buff_din(fsd_buff_din),
 
 	.led(led),
 	.reset_req(reset_req),
@@ -373,10 +387,17 @@ integer     sd_hr, sd_reads = 0, sd_writes = 0;
 // (its poll cadence on hardware is about a millisecond; default: at once)
 integer     hostlat = 0, hl_cnt = 0;
 initial if ($value$plusargs("hostlat=%d", hostlat)) ;
-wire        sd_idle = !sd_ack && !sd_rd_act && !sd_wr_act;
+wire        sd_idle = !m_ack && !sd_rd_act && !sd_wr_act;
+// the request: the floppy's first when both ask
+wire        q_flp   = fsd_rd | fsd_wr;
+wire        q_rd    = q_flp ? fsd_rd : sd_rd;
+wire        q_wr    = q_flp ? fsd_wr : sd_wr;
+wire [31:0] q_lba   = q_flp ? fsd_lba : sd_lba;
+wire  [2:0] q_unit  = q_flp ? 3'd4 : sd_unit;
+wire  [7:0] m_din   = m_flp ? fsd_buff_din : sd_buff_din;
 wire        hl_ok   = (hl_cnt >= hostlat);
 always @(posedge clk_sys) begin
-	if (sd_idle && (sd_rd || sd_wr)) begin
+	if (sd_idle && (q_rd || q_wr)) begin
 		if (hl_cnt < hostlat) hl_cnt <= hl_cnt + 1;
 	end
 	else hl_cnt <= 0;
@@ -384,48 +405,50 @@ end
 
 always @(posedge clk_sys) begin
 	sd_buff_wr <= 0;
-	if (sd_idle && sd_rd && hl_ok) begin
-		sd_ack       <= 1;
+	if (sd_idle && q_rd && hl_ok) begin
+		m_ack        <= 1;
+		m_flp        <= q_flp;
 		sd_rd_act    <= 1;
 		sd_buff_addr <= 0;
-		sd_win       <= (sd_lba >= WIN_BASE);
-		if (sd_lba >= WIN_BASE)
-			sd_hr = host_fill({29'd0, sd_unit}, sd_lba, 512);
+		sd_win       <= (q_lba >= WIN_BASE);
+		if (q_lba >= WIN_BASE)
+			sd_hr = host_fill({29'd0, q_unit}, q_lba, 512);
 		else begin
-			sd_hr = disk_read({29'd0, sd_unit}, sd_lba);
+			sd_hr = disk_read({29'd0, q_unit}, q_lba);
 			sd_reads = sd_reads + 1;
 			if (sd_reads <= 64 || (sd_reads % 1024) == 0)
-				$display("[SD] read slot %0d lba %0d (#%0d)%s", sd_unit, sd_lba, sd_reads,
+				$display("[SD] read slot %0d lba %0d (#%0d)%s", q_unit, q_lba, sd_reads,
 				         (sd_hr != 0) ? "" : " -- no image");
 		end
 	end
-	else if (sd_ack && sd_rd_act) begin
+	else if (m_ack && sd_rd_act) begin
 		if (!sd_buff_wr) begin
 			sd_buff_dout <= sd_win ? host_byte({18'd0, sd_buff_addr}) : disk_byte({18'd0, sd_buff_addr});
 			sd_buff_wr   <= 1;
 			if (sd_buff_addr == 14'd511) begin
-				sd_ack    <= 0;
+				m_ack     <= 0;
 				sd_rd_act <= 0;
 			end
 		end
 		else if (sd_buff_addr != 14'd511) sd_buff_addr <= sd_buff_addr + 1'd1;
 	end
-	else if (sd_idle && sd_wr && hl_ok) begin
-		sd_ack       <= 1;
+	else if (sd_idle && q_wr && hl_ok) begin
+		m_ack        <= 1;
+		m_flp        <= q_flp;
 		sd_wr_act    <= 1;
 		sd_buff_addr <= 0;
 		sd_rphase    <= 0;
-		sd_win       <= (sd_lba >= WIN_BASE);
-		sd_slot      <= sd_unit;
-		sd_blk       <= sd_lba;
+		sd_win       <= (q_lba >= WIN_BASE);
+		sd_slot      <= q_unit;
+		sd_blk       <= q_lba;
 	end
-	else if (sd_ack && sd_wr_act) begin
+	else if (m_ack && sd_wr_act) begin
 		if (sd_rphase) begin
-			if (sd_win) host_put({18'd0, sd_buff_addr}, {24'd0, sd_buff_din});
-			else        disk_put({18'd0, sd_buff_addr}, {24'd0, sd_buff_din});
+			if (sd_win) host_put({18'd0, sd_buff_addr}, {24'd0, m_din});
+			else        disk_put({18'd0, sd_buff_addr}, {24'd0, m_din});
 			sd_rphase <= 0;
 			if (sd_buff_addr == 14'd511) begin
-				sd_ack    <= 0;
+				m_ack     <= 0;
 				sd_wr_act <= 0;
 				if (sd_win) host_exec({29'd0, sd_slot}, sd_blk, 512);
 				else begin

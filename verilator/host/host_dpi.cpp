@@ -88,13 +88,14 @@ extern "C" int host_mount_disk(int slot, long long bytes)
 }
 
 // ------------------------------------------------------------ disk images
-static int     dfd[4] = {-1, -1, -1, -1};
-static int64_t dbytes[4];
+// slots 0..3 as tc_scsi's, 4 = the floppy (next_floppy, --floppy)
+static int     dfd[5] = {-1, -1, -1, -1, -1};
+static int64_t dbytes[5];
 static uint8_t dblk[512];
 
 int64_t sim_disk_open(int slot, const char *path)
 {
-	if (slot < 0 || slot > 3) return -1;
+	if (slot < 0 || slot > 4) return -1;
 	int fd = open(path, O_RDWR);
 	if (fd < 0) { perror(path); return -1; }
 	dfd[slot] = fd;
@@ -105,7 +106,7 @@ int64_t sim_disk_open(int slot, const char *path)
 extern "C" int disk_read(int slot, int lba)
 {
 	memset(dblk, 0, sizeof dblk);
-	if (slot < 0 || slot > 3 || dfd[slot] < 0) return 0;
+	if (slot < 0 || slot > 4 || dfd[slot] < 0) return 0;
 	off_t at = (off_t)(uint32_t)lba * 512;
 	return pread(dfd[slot], dblk, sizeof dblk, at) == (ssize_t)sizeof dblk;
 }
@@ -122,7 +123,7 @@ extern "C" void disk_put(int i, int b)
 
 extern "C" void disk_write(int slot, int lba)
 {
-	if (slot < 0 || slot > 3 || dfd[slot] < 0) return;
+	if (slot < 0 || slot > 4 || dfd[slot] < 0) return;
 	off_t at = (off_t)(uint32_t)lba * 512;
 	if (pwrite(dfd[slot], dblk, sizeof dblk, at) != (ssize_t)sizeof dblk) perror("disk_write");
 }

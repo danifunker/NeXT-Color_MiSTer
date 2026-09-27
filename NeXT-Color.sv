@@ -71,6 +71,10 @@ localparam CONF_STR = {
 	"SC0,HDAVHDIMG,SCSI disk 0;",
 	"SC1,HDAVHDIMG,SCSI disk 1;",
 	"S3,ISOCUEBINCHD,CD-ROM;",
+	// slot 4: the 2.88 MB floppy drive (rtl/next_floppy.sv; 720K, 1.44M and
+	// 2.88M images, the geometry follows the size).  Same slot and
+	// extensions as the mono NeXT core.
+	"S4,IMGIMAFLPVFDFD ,Floppy;",
 	"-;",
 	"O[4:3],Memory,64 MB,128 MB,16 MB,32 MB;",
 	"O[5],Power-on self test,On,Off;",
@@ -101,10 +105,11 @@ wire  [7:0] ioctl_dout;
 
 // SD slots (NeXT_MiSTer NeXT.sv): WIDE=0 because tc_scsi keeps next_scsi's
 // 8-bit sd_buff port; VDNUM 4 = slots 0..3 (slot 2 has no OSD entry, so
-// target 2 always times out, as in the mono core).  tc_scsi talks to one
+// target 2 always times out, as in the mono core), slot 4 = the floppy
+// (VDNUM 5).  tc_scsi talks to one
 // target at a time: its request goes to slot sd_unit and only that slot's
 // acknowledge comes back.
-wire  [3:0] img_mounted_v, sd_ack_v;
+wire  [4:0] img_mounted_v, sd_ack_v;
 wire        img_readonly;
 wire [63:0] img_size;
 wire  [2:0] sd_unit;
@@ -115,8 +120,12 @@ wire  [7:0] sd_buff_dout, sd_buff_din;
 wire        sd_buff_wr;
 wire  [3:0] scsi_onehot = 4'd1 << sd_unit[1:0];
 wire        sd_ack      = (sd_unit < 3'd4) ? sd_ack_v[sd_unit[1:0]] : 1'b0;
+// the floppy's own request on slot 4 (tc_machine / next_floppy)
+wire [31:0] fsd_lba;
+wire        fsd_rd, fsd_wr;
+wire  [7:0] fsd_buff_din;
 
-hps_io #(.CONF_STR(CONF_STR), .WIDE(0), .VDNUM(4)) hps_io
+hps_io #(.CONF_STR(CONF_STR), .WIDE(0), .VDNUM(5)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(HPS_BUS),
@@ -141,18 +150,18 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(0), .VDNUM(4)) hps_io
 	.img_mounted(img_mounted_v),
 	.img_readonly(img_readonly),
 	.img_size(img_size),
-	.sd_lba('{sd_lba, sd_lba, sd_lba, sd_lba}),
-	.sd_rd({4{sd_rd}} & scsi_onehot),
-	.sd_wr({4{sd_wr}} & scsi_onehot),
+	.sd_lba('{fsd_lba, sd_lba, sd_lba, sd_lba, sd_lba}),
+	.sd_rd({fsd_rd, {4{sd_rd}} & scsi_onehot}),
+	.sd_wr({fsd_wr, {4{sd_wr}} & scsi_onehot}),
 	.sd_ack(sd_ack_v),
-	.sd_blk_cnt('{6'd0, 6'd0, 6'd0, 6'd0}),
+	.sd_blk_cnt('{6'd0, 6'd0, 6'd0, 6'd0, 6'd0}),
 	.sd_buff_addr(sd_buff_addr),
 	.sd_buff_dout(sd_buff_dout),
-	.sd_buff_din('{sd_buff_din, sd_buff_din, sd_buff_din, sd_buff_din}),
+	.sd_buff_din('{fsd_buff_din, sd_buff_din, sd_buff_din, sd_buff_din, sd_buff_din}),
 	.sd_buff_wr(sd_buff_wr)
 );
 
-assign LED_DISK = {1'b0, sd_busy};
+assign LED_DISK = {1'b0, sd_busy | sd_ack_v[4]};
 
 ///////////////////////   CLOCKS   ///////////////////////////////
 
@@ -303,7 +312,7 @@ tc_machine machine
 	.pot_on(pot_on),
 	.boot_cmd(boot_cmd),
 
-	.img_mounted({2'b00, img_mounted_v}),
+	.img_mounted({2'b00, img_mounted_v[3:0]}),
 	.img_readonly(img_readonly),
 	.img_size(img_size),
 	.sd_unit(sd_unit),
@@ -316,6 +325,12 @@ tc_machine machine
 	.sd_buff_din(sd_buff_din),
 	.sd_buff_wr(sd_buff_wr),
 	.sd_busy(sd_busy),
+	.fimg_mounted(img_mounted_v[4]),
+	.fsd_lba(fsd_lba),
+	.fsd_rd(fsd_rd),
+	.fsd_wr(fsd_wr),
+	.fsd_ack(sd_ack_v[4]),
+	.fsd_buff_din(fsd_buff_din),
 
 	.led(led),
 	.reset_req(reset_req),
