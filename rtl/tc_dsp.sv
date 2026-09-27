@@ -16,8 +16,13 @@
 //               bit 2 reads 0 (dsp_core.c write & $FB).  INIT: with RREQ the
 //               RX side is emptied, with TREQ the TX side, and the DMA byte
 //               counter restarts (dsp_core.c:1179-1192).
-//    $8001 CVR  r/w  bit 7 HC (host command, cleared when the DSP takes it),
-//               4:0 HV; reset $12 (& $9F, dsp_core.c:1208).
+//    $8001 CVR  r/w  bit 7 HC (host command), 4:0 HV; reset $12 (& $9F,
+//               dsp_core.c:1208).  HC clears as soon as the command is on
+//               the link: a 56001 takes a host command within nanoseconds
+//               and NeXTSTEP's sound driver resets a DSP that has not taken
+//               one in well under a millisecond.  Main holds the host's
+//               later accesses until the DSP has taken it (next_dsp.cpp
+//               hc_holds), so the DSP sees them in the host's order.
 //    $8002 ISR  r    bit 0 RXDF, 1 TXDE, 2 TRDY (TXDE and the DSP has read
 //               every word), 3 HF2, 4 HF3 (from the DSP's HCR), 6 DMA
 //               (HM != 0), 7 HREQ = (ICR & ISR) bits 1:0 (dsp_core.c:1048).
@@ -337,7 +342,7 @@ always_ff @(posedge clk) begin : host
 			R_RX:      if (d2h_ok_rx && rx_cnt != K[2:0]) push_rx = 1'b1;
 			R_HRXACK:  if (d2h_ok_tx && tx_out != 3'd0) tx_ack = 1'b1;
 			R_FLAGS:   if (d2h_same_reset) hf23 <= d2h_m[4:3];
-			R_HCACK:   if (d2h_same_reset && !cvr_wr) cvr[7] <= 1'b0;
+			R_HCACK:   ;                 // informational: HC cleared when sent
 			R_TXD:     if (d2h_same_reset) txd_act <= d2h_m[0];
 			R_HIRESET: if (d2h_same_reset) hi_reset = 1'b1;
 			default: ;
@@ -378,6 +383,7 @@ always_ff @(posedge clk) begin : host
 			end
 			else if (p_cvr && !cvr_wr) begin
 				push = 1'b1; push_t = T_CVR; push_d = {16'd0, p_cvrv}; p_cvr <= 1'b0;
+				cvr[7] <= 1'b0;          // the command is on its way: taken
 			end
 			else if (p_rxack != 3'd0) begin
 				push = 1'b1; push_t = T_RXACK;

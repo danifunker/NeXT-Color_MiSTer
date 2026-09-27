@@ -188,15 +188,32 @@ localparam logic [23:0] PROG [0:11] = '{
 	24'h0aa823, 24'h0aa980, 24'h000001, 24'h56f000, 24'h00ffeb, 24'h240100,
 	24'h200040, 24'h0aa981, 24'h000007, 24'h567000, 24'h00ffeb, 24'h0c0001};
 
+// The host command program: HCIE on, host interrupts at IPL 2 and
+// unmasked, HF2 = running, then an idle loop; P:$24 (host command $12, the
+// Music Kit's HOST_R_DONE) is a fast interrupt that sets HF3.
+function automatic logic [23:0] prog_hc(input int a);
+	case (a)
+	0:  prog_hc = 24'h0aa822;       // bset #2,x:$ffe8        HCIE
+	1:  prog_hc = 24'h08f4bf;       // movep #$000c00,x:$ffff  IPR: host IPL 2
+	2:  prog_hc = 24'h000c00;
+	3:  prog_hc = 24'h00fcb8;       // andi #$fc,mr
+	4:  prog_hc = 24'h0aa823;       // bset #3,x:$ffe8        HF2
+	5:  prog_hc = 24'h0c0005;       // jmp *
+	36: prog_hc = 24'h0aa824;       // P:$24 bset #4,x:$ffe8  HF3
+	default: prog_hc = 24'h000000;  // nop
+	endcase
+endfunction
+
 // SCR2: DSP_RESET (31), BLK_END (30), UNPKD (29), MODE_B/A (28/27), MEM_EN (5)
-task automatic dsp_boot();
+task automatic dsp_boot(input bit hc);
 	scr2[31] = 1'b0;                           // reset
 	repeat (50) @(negedge clk);
 	scr2[5] = 1'b1;                            // DSP memory on
 	scr2[28] = 1'b1; scr2[27] = 1'b0;          // mode 1: bootstrap from the host
 	repeat (5) @(negedge clk);
 	scr2[31] = 1'b1;                           // start
-	for (int i = 0; i < 12; i++) send_word(PROG[i]);
+	if (hc) for (int i = 0; i < 38; i++) send_word(prog_hc(i));
+	else    for (int i = 0; i < 12; i++) send_word(PROG[i]);
 	wr(ICR, 8'h08);                            // HF0: the bootstrap ends, the program runs
 endtask
 
@@ -239,7 +256,7 @@ initial begin : test
 
 	// ------------------------------------------------------------------
 	$display("bootstrap + echo");
-	dsp_boot();
+	dsp_boot(1'b0);
 	wait_isr(3, 1'b1, 5000, "HF2 set by the program's bset #3,x:$ffe8", ok);
 	for (k = 0; k < 6; k++) begin
 		send_word(24'h000100 * k + 24'h000033);
@@ -361,7 +378,7 @@ initial begin : test
 	rd(ICR, v); check(v == 8'h00, "ICR after a DSP reset");
 	rd(ISR, v); check(v == 8'h06, $sformatf("ISR after a DSP reset %02x", v));
 	rd(CVR, v); check(v == 8'h12, "CVR after a DSP reset");
-	dsp_boot();
+	dsp_boot(1'b0);
 	wait_isr(3, 1'b1, 5000, "HF2 again", ok);
 	send_word(24'h000777);
 	recv_word(w); check(w == 24'h010777, $sformatf("echo after the reboot %06x", w));
@@ -374,6 +391,21 @@ initial begin : test
 		recv_word(w);
 		check(w == 24'h010009 + 24'h000100 * k, $sformatf("slow echo %0d: %06x", k, w));
 	end
+
+	// host commands, the kernel's pattern at the end of every DMA read
+	// buffer: CVR $92 (HOST_R_DONE) and CVR $12 right after.  The host sees
+	// HC clear at once (NeXTSTEP resets a DSP that has not taken a command
+	// within a millisecond), and the write after it must not cancel the
+	// command before the DSP has taken it (Main holds the ring).
+	$display("host command");
+	dsp_boot(1'b1);
+	wait_isr(3, 1'b1, 5000, "HF2 from the host command program", ok);
+	rd(ISR, v); check(!v[4], $sformatf("HF3 clear before the command (ISR %02x)", v));
+	wr(CVR, 8'h92);
+	repeat (8) @(negedge clk);
+	rd(CVR, v); check(v == 8'h12, $sformatf("CVR %02x a few clocks after the command: HC clear", v));
+	wr(CVR, 8'h12);
+	wait_isr(4, 1'b1, 5000, "HF3: the $12 handler ran, the CVR write after it did not cancel it", ok);
 
 	$display("DSP instructions run: %0d in %0d ARM passes, mailbox words: %0d, simulated %0t",
 	         dsp_instr, arm_calls, mb_ops, $time);
