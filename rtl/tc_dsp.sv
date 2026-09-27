@@ -242,7 +242,7 @@ always_ff @(posedge clk) begin : host
 	reg        push;         // a message into mq this clock
 	reg  [3:0] push_t;
 	reg [23:0] push_d;
-	reg        pop_rx, push_rx, tx_sent, txl, init_rx, init_tx, hi_reset;
+	reg        pop_rx, push_rx, tx_sent, tx_ack, txl, init_rx, init_tx, hi_reset;
 	reg [23:0] tx_w;
 
 	ack <= stb;
@@ -271,7 +271,7 @@ always_ff @(posedge clk) begin : host
 	end
 	else begin
 		push = 1'b0; push_t = 4'd0; push_d = 24'd0;
-		pop_rx = 1'b0; push_rx = 1'b0; tx_sent = 1'b0; txl = 1'b0;
+		pop_rx = 1'b0; push_rx = 1'b0; tx_sent = 1'b0; tx_ack = 1'b0; txl = 1'b0;
 		init_rx = 1'b0; init_tx = 1'b0; hi_reset = 1'b0;
 		tx_w = tx;
 
@@ -335,7 +335,7 @@ always_ff @(posedge clk) begin : host
 		if (d2h_v) begin
 			case (d2h_type)
 			R_RX:      if (d2h_ok_rx && rx_cnt != K[2:0]) push_rx = 1'b1;
-			R_HRXACK:  if (d2h_ok_tx && tx_out != 3'd0) tx_out <= tx_out - 3'd1;
+			R_HRXACK:  if (d2h_ok_tx && tx_out != 3'd0) tx_ack = 1'b1;
 			R_FLAGS:   if (d2h_same_reset) hf23 <= d2h_m[4:3];
 			R_HCACK:   if (d2h_same_reset && !cvr_wr) cvr[7] <= 1'b0;
 			R_TXD:     if (d2h_same_reset) txd_act <= d2h_m[0];
@@ -394,10 +394,12 @@ always_ff @(posedge clk) begin : host
 			mq[mq_wr] <= {epoch, push_t, push_d};
 			mq_wr <= mq_wr + 4'd1;
 		end
-		if (tx_sent) begin
-			tx_full <= 1'b0;
-			tx_out  <= tx_out + 3'd1;
-		end
+		// one update of tx_out per clock: an "HRX read" arriving in the
+		// clock a TX word goes on the link must not be lost (it was, and
+		// TRDY -- the Music Kit's condition before every host message --
+		// never came back after a long load)
+		if (tx_sent) tx_full <= 1'b0;
+		tx_out <= tx_out + {2'd0, tx_sent} - {2'd0, tx_ack};
 
 		//------------------------------------------------------------
 		// INIT (after the messages: the T_ICR carries the new epoch)

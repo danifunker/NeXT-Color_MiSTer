@@ -268,6 +268,33 @@ initial begin : test
 		else repeat (10) @(negedge clk);
 	end
 
+	// a long stream with the host's pace swept against the link: an "HRX
+	// read" from the ARM landing in the clock a TX word goes on the link
+	// was lost, TRDY never came back (the Music Kit waits for TRDY before
+	// every host message and hung after loading its monitor)
+	$display("long stream, TRDY after it");
+	sent = 0; got = 0;
+	void'($urandom(32'h5eed));
+	while (got < 3000) begin
+		rd(ISR, v);
+		if (v[0]) begin
+			logic [7:0] h, m, l;
+			rd(TRXH, h); rd(TRXM, m); rd(TRXL, l);
+			if ({h, m, l} != {8'h01, 8'(got), 8'h3C})
+				check(1'b0, $sformatf("long stream word %0d: %02x%02x%02x", got, h, m, l));
+			got++;
+		end
+		else if (v[1] && sent < 3000) begin
+			repeat ($urandom_range(0, 263)) @(negedge clk);   // across the 4 us poll
+			wr(TRXH, 8'h00); wr(TRXM, 8'(sent)); wr(TRXL, 8'h3C);
+			sent++;
+		end
+		else @(negedge clk);
+	end
+	check(got == 3000, "long stream: 3000 words echoed in order");
+	wait_isr(2, 1'b1, 20000, "TRDY after the long stream", ok);
+	check(dut.tx_out == 3'd0, $sformatf("no word left counted as unread (tx_out %0d)", dut.tx_out));
+
 	// interrupt mode: HREQ with RREQ
 	$display("HREQ");
 	wr(ICR, 8'h09);                            // RREQ (keep HF0)
