@@ -48,7 +48,7 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-set_global_assignment -name SEED 3
+set_global_assignment -name SEED 1
 
 # Fitter recipe and build switches from MacQuadra800_MiSTer (its release recipe,
 # minus MISTER_DISABLE_SHADOWMASK and the other switches that need its patched sys/,
@@ -76,6 +76,11 @@ set_global_assignment -name SEED 3
 #     seed 3: 37,484 ALMs (89%), LABs 4,147 (99%), 271 M10K: TIMING MET, worst
 #             +0.106 (clk_ram); HDMI +0.224, clk_sys +0.792, clk_vid +1.217, hold
 #             +0.251.  rbf md5 34396054.  Kept.
+#   6d2e1a5 (the page-end prefetch fault fix, open question 39), 2026-09-26:
+#     seed 3: clk_sys -0.183 ns: TIMING NOT MET.
+#     seed 1: 37,483 ALMs: TIMING MET, worst +0.208 (clk_sys); HDMI +0.240,
+#             clk_ram +0.286, clk_vid +1.118, hold +0.246.  rbf md5 6382ea7a.
+#             On hardware: cc and NWBench's Compile run.  Kept.
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"

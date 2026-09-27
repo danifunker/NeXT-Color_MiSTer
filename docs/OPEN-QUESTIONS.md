@@ -176,6 +176,8 @@ and what would settle it. "HS n" = `rom-dissassembly/hardware-summary.md` sectio
     5 tb/asm failures: t_mmu 60, t_atcprobe, t_bitfield_mmu, t_movem_restart,
     t_moves_fc).  Fixed with `--unroll-count 256` in verilator/Makefile and
     verilator/cpu/*.sh.  Case 6 fails a bench FC check: see 40.
+    **Hardware-confirmed** (6d2e1a5, seed 1, md5 6382ea7a): the full NWBench
+    suite runs, Compile included.  Closed.
 40. **Bench FC check in `t_pageend` case 6** (caches on, target page invalid):
     `tb_ap040_program.v` reports "exception/reset data cycle used FC=1,
     expected 5" -- a supervisor-stack READ of $3BFC in core state 111 during
