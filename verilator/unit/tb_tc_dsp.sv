@@ -189,7 +189,7 @@ localparam logic [23:0] PROG [0:11] = '{
 	24'h200040, 24'h0aa981, 24'h000007, 24'h567000, 24'h00ffeb, 24'h0c0001};
 
 // The host command program: HCIE on, host interrupts at IPL 2 and
-// unmasked, HF2 = running, then an idle loop.  P:$24 (host command $12, the
+// unmasked, HF2 = running, then a busy loop.  P:$24 (host command $12, the
 // Music Kit's HOST_R_DONE) is a long interrupt to P:$30, shaped like the
 // monitor's handlers: HCR written with HF2 and HF3 clear, some work, then
 // HF3 set ("timed message queue full") in one HCR write, RTI.
@@ -200,11 +200,15 @@ function automatic logic [23:0] prog_hc(input int a);
 	2:  prog_hc = 24'h000c00;
 	3:  prog_hc = 24'h00fcb8;       // andi #$fc,mr
 	4:  prog_hc = 24'h0aa823;       // bset #3,x:$ffe8          HF2
-	5:  prog_hc = 24'h0c0005;       // jmp *
+	5:  prog_hc = 24'h000000;       // nop       a busy loop, not a spin on
+	6:  prog_hc = 24'h0c0005;       // jmp $5    one instruction (the Music Kit's
+	                                //           DSP is computing, not waiting)
 	36: prog_hc = 24'h0bf080;       // P:$24 jsr >$30
 	37: prog_hc = 24'h000030;
 	48: prog_hc = 24'h08f4a8;       // P:$30 movep #$04,x:$ffe8  HF2, HF3 clear
 	49: prog_hc = 24'h000004;
+	50: prog_hc = 24'h08f4ab;       // P:$32 movep #$0a0b0c,x:$ffeb  an ack to the
+	51: prog_hc = 24'h0a0b0c;       //       host (the monitor's HOST_R_DONE ack)
 	82: prog_hc = 24'h08f4a8;       // P:$52 movep #$14,x:$ffe8  HF3 set
 	83: prog_hc = 24'h000014;
 	84: prog_hc = 24'h000004;       // P:$54 rti
@@ -410,6 +414,7 @@ initial begin : test
 	wait_isr(3, 1'b1, 5000, "HF2 from the host command program", ok);
 	rd(ISR, v); check(!v[4], $sformatf("HF3 clear before the command (ISR %02x)", v));
 	wr(CVR, 8'h92);
+	wr(ICR, 8'h89);                            // INIT RX, RREQ, HF0: NeXTSTEP's next access
 	repeat (8) @(negedge clk);
 	rd(CVR, v); check(v == 8'h12, $sformatf("CVR %02x a few clocks after the command: HC clear", v));
 	wr(CVR, 8'h12);
@@ -428,6 +433,11 @@ initial begin : test
 	end
 	check(ok, "HF3: the $12 handler ran, the CVR write after it did not cancel it");
 	rd(ISR, v); check(!v[3] && v[4], $sformatf("after the handler: HF2 clear, HF3 set (ISR %02x)", v));
+	// the handler wrote its ack after the host's INIT (on a 56001 the host's
+	// accesses right after a command land while the handler starts): it
+	// must not be thrown away with the words from before the INIT
+	recv_word(w); check(w == 24'h0a0b0c, $sformatf("the handler's ack after the INIT: %06x", w));
+	wr(ICR, 8'h08);
 
 	$display("DSP instructions run: %0d in %0d ARM passes, mailbox words: %0d, simulated %0t",
 	         dsp_instr, arm_calls, mb_ops, $time);
