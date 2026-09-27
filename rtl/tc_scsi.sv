@@ -258,15 +258,18 @@ integer sk;                      // reset scan index
 localparam [7:0] CD8 = {2'b00, CD_UNITS};
 
 reg  [7:0] disk_present_v = 0;
-// A CD-ROM's medium can be gone while the drive is still on the bus:
-// after START STOP UNIT with LoEj (the eject NeXTSTEP's Workspace sends
-// for "Eject"), or after the OSD unmounted the image.  The drive then
-// answers selection, INQUIRY, REQUEST SENSE and MODE SENSE as before and
-// every medium command with NOT READY / medium not present, until the
-// OSD mounts an image again.  Without this the eject reported GOOD but
-// the medium stayed, and NeXTSTEP kept asking the user to eject it.
+// The CD-ROM drive is always on the bus, with or without a medium (a
+// real drive, and Previous's SD_CD target: scsi.c SCSI_TestUnitReady).
+// NeXTSTEP probes the bus once, at boot, so a drive that only appeared
+// with its first image was never seen by a system booted without one.
+// Without a medium -- none mounted yet, after START STOP UNIT with LoEj
+// (the eject NeXTSTEP's Workspace sends for "Eject"), or after the OSD
+// unmounted the image -- the drive answers selection, INQUIRY, REQUEST
+// SENSE and MODE SENSE and every medium command with NOT READY / medium
+// not present, until the OSD mounts an image.  Without the eject state
+// the eject reported GOOD but the medium stayed, and NeXTSTEP kept asking
+// the user to eject it.
 reg  [7:0] ejected_v = 0;        // ejected by START STOP UNIT
-reg  [7:0] cd_seen_v = 0;        // a CD unit that has had an image this session
 // the command FSM's eject/load request (one driver per register: the
 // mount block owns ejected_v, the FSM toggles eject_tog)
 reg        eject_tog = 0, eject_tog_q = 0;
@@ -438,7 +441,6 @@ always @(posedge clk) begin
 			disk_ro_v[mk] <= img_readonly;
 			img_blocks_v[uidx(mk[2:0])] <= img_size[40:9];
 			ejected_v[mk] <= 0;
-			if (img_size != 0 && CD8[mk]) cd_seen_v[mk] <= 1;
 		end
 	end
 end
@@ -936,7 +938,7 @@ task automatic start_command;
 				msg_len_pending <= 0; msg_reject <= 0; msg_left <= 0;
 				cdb_n <= 0;
 				if (!has_unit(selectbusid[2:0]) ||
-				    (!disk_present_v[selectbusid[2:0]] && !cd_seen_v[selectbusid[2:0]])) begin
+				    (!disk_present_v[selectbusid[2:0]] && !CD8[selectbusid[2:0]])) begin
 					// esp_select() clears both command ranks on timeout.
 					intstatus <= INTR_DC;
 					command0 <= 0;

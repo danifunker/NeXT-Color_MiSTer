@@ -1399,9 +1399,23 @@ initial begin
 	//------------------------------------------------------------
 	$display("INQUIRY scan of targets 0..6");
 	timeouts = 0;
+	// the CD-ROM drive (target 3) is on the bus without a medium: NeXTSTEP
+	// probes the bus once at boot and must see the drive to see a disc
+	// inserted later.  The ROM's scan counts it (type 5) after the disk.
 	sd_find_target(1, 0, target);
-	check(target == -1, $sformatf("scan for a second disk found %0d", target));
-	check(timeouts == 18, $sformatf("%0d selection timeouts, want 6 absent targets x 3", timeouts));
+	check(target == 3, $sformatf("scan for a second device found %0d, want the CD-ROM (3)", target));
+	check(timeouts == 6, $sformatf("%0d selection timeouts, want targets 1, 2 absent x 3", timeouts));
+	cdb_clear();                               // TEST UNIT READY on the empty drive
+	dv_target = 8'd3; dv_lun = 8'd0; dv_len = 0;
+	sd_command(ok);
+	check(!ok, "TEST UNIT READY on the empty CD-ROM fails");
+	check(mem_rb(SD_BUF + 2) == 8'h02 && mem_rb(SD_BUF + 12) == 8'h3A,
+	      $sformatf("empty CD-ROM sense key %02x code %02x, want 2 / 3A (medium not present)",
+	      mem_rb(SD_BUF + 2), mem_rb(SD_BUF + 12)));
+	timeouts = 0;
+	sd_find_target(2, 0, target);
+	check(target == -1, $sformatf("scan for a third device found %0d", target));
+	check(timeouts == 15, $sformatf("%0d selection timeouts, want targets 1, 2, 4, 5, 6 absent x 3", timeouts));
 	check(aborts == 0, $sformatf("%0d scsi_abort calls", aborts));
 
 	//------------------------------------------------------------

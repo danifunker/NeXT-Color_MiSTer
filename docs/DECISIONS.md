@@ -136,6 +136,25 @@ as "HS §n") and in the Previous r1851 sources under `scratch/resources/`.
   ARM through a DDR3 mailbox at $30400000 (protocol in
   support/next/next_dsp.cpp).  A DSP core in the FPGA would plug in behind
   the same host port later.
+- **TRDY needs an exact count of the words with the DSP.**  The FPGA
+  counts TX words sent to the ARM minus "HRX read" acknowledgements
+  (tx_out); TXDE = fewer than 2, TRDY = none.  libdsp's host messages wait
+  for CVR HC 0, ISR TRDY 1, HF2 0, HF3 0 (`_DSPWriteHostMessage`,
+  hm_mask $801C00 / hm_flags $000400 over {ICR,CVR,ISR,IVR}), so one lost
+  acknowledgement hangs the Music Kit for good while plain TX writes (TXDE)
+  keep working.  tx_out has one update per clock.
+
+## SCSI CD-ROM (2026-09-27)
+
+- **The CD-ROM drive (target 3) is always on the bus**, empty or not, like
+  a real drive and Previous's SD_CD target: without a medium it answers
+  selection, INQUIRY, REQUEST SENSE and MODE SENSE, and the medium commands
+  with CHECK CONDITION, NOT READY / $3A medium not present.  NeXTSTEP
+  probes the SCSI bus once, at boot; before this the drive appeared only
+  with its first image, so a system booted without a disc never saw one
+  inserted later.  (The mono core has the old behaviour.)  The ROM's boot
+  scan counts the CD-ROM (type 5) after the disks, so `sd` still boots
+  target 0.
 
 ## Simulation
 
