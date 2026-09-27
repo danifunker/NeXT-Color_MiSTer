@@ -109,8 +109,10 @@ and what would settle it. "HS n" = `rom-dissassembly/hardware-summary.md` sectio
 31. Selection timeout follows Previous's 20 MHz formula (~314 ms per try, 3 tries
     per absent target): a boot disk that is not target 0 costs ~1 s per absent
     lower target.
-32. Only the SCSI and Ethernet TX/RX channels move data (the Ethernet ones
-    since the T7213 model); sound out/in, printer and DSP are registers only.
+32. Only the SCSI, Ethernet TX/RX and sound-out channels move data (sound out
+    since 85522cb); sound in, printer and DSP are registers only.  Sound in
+    stays that way on purpose (no CODEC / microphone on this core; user
+    decision 2026-09-27).
 33. **DMA targets DRAM only** (tc_machine): a channel pointed at VRAM, ROM or
     I/O gets m_err -> COMPLETE|BUSEXC.  Previous DMAs to any memory bank.
     Nothing in the ROM does it; NeXTSTEP might (e.g. a DMA into the frame

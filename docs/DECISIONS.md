@@ -118,6 +118,25 @@ as "HS §n") and in the Previous r1851 sources under `scratch/resources/`.
   required on hardware: without it Main answers no INQUIRY / READ CAPACITY
   windows for this core.  Build: `scripts/build_main_wsl.sh`.
 
+## Sound and DSP (2026-09-27)
+
+- **Sound out, no sound in.**  The KMS sound box is the mono core's
+  next_kms_snd.sv engine (queue, 44.1 kHz tick from the real clk_sys,
+  double-sample modes, underrun, volume, next_sound_output) inside tc_kms;
+  the Turbo's sound-out DMA channel is tc_tdma's (so_* port).  No CODEC /
+  microphone input and no DSP serial ports (SSI/SCI): the MiSTer has no
+  connector for them.  +~820 ALMs (94%), 16 DSP blocks (next_sound_output's
+  multipliers).  On hardware: the system sounds (16-bit 22.05 kHz stereo)
+  play correctly (user, 2026-09-27).
+- **The DSP56001 runs on the ARM**, in Previous r1851's interpreter
+  (Main_MiSTer support/next/dsp56k, host port split), measured at 1.5 M
+  instructions/s on core 0 (12% of a 25 MHz 56001): the user chose "ARM
+  now, FPGA later".  The FPGA keeps the 68040's side of the host port
+  (rtl/tc_dsp.sv) and trades the host port's internal transfers with the
+  ARM through a DDR3 mailbox at $30400000 (protocol in
+  support/next/next_dsp.cpp).  A DSP core in the FPGA would plug in behind
+  the same host port later.
+
 ## Simulation
 
 - Full-machine Verilator sim instantiates the machine and the **real memory
