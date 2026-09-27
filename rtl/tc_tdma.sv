@@ -109,7 +109,15 @@
 //    * INT_SND_OUT_DMA (bit 23) = COMPLETE; a bus error stops the channel
 //      with COMPLETE|BUSEXC (dma.c:714-718).
 //
-//  Other channels (sound in, printer, DSP): register model only.  Their
+//  DSP channel (the client is tc_dsp, port dd_*), dma.c dma_dsp_write_memory
+//  / dma_dsp_read_memory / dma_dsp_ready (dma.c:975-1043): one byte per
+//  request at Next (the DSP host port's DMA moves bytes, dsp.c:139-172);
+//  dd_avail = ENABLE and Next < Limit.  The byte that brings Next to Limit
+//  pulses dd_blkend (DSP_SetIRQB) and completes the channel (dma_interrupt:
+//  COMPLETE, SUPDATE chain or ENABLE off).  A withdrawn request or a RESET
+//  drops the byte in flight.  INT_DSP_DMA (bit 20) = COMPLETE.
+//
+//  Other channels (sound in, printer): register model only.  Their
 //  CSR status bits are flip-flops (same command semantics); their
 //  Next/Limit/Start/Stop and the plain registers live in one 32-word RAM (no
 //  reset: block RAM / MLAB).  HOOK: to give a channel an engine, move its
@@ -184,6 +192,15 @@ module tc_tdma
 	output reg        so_ack,        // pulse: so_rdata valid, Next already advanced
 	output reg [31:0] so_rdata,      // one frame {L[15:0], R[15:0]}
 	output            so_avail,      // ENABLE and Next < Limit
+
+	// DSP channel client port (tc_dsp dd_*): one byte per request
+	input             dd_req,        // level: move one byte at Next
+	input             dd_we,         // 1 = device to memory
+	input       [7:0] dd_wdata,
+	output reg        dd_ack,        // pulse: done, Next already advanced
+	output reg  [7:0] dd_rdata,      // with dd_ack (memory to device)
+	output            dd_avail,      // ENABLE and Next < Limit
+	output reg        dd_blkend,     // pulse with dd_ack: Next reached Limit
 
 	// interrupt levels (interrupt status bits, Previous sysReg.h)
 	output            int_scsi_dma,     // 26
@@ -261,6 +278,7 @@ reg [31:0] s_next, s_limit, s_start, s_stop;     // the SCSI channel's pointers
 reg [31:0] t_next, t_limit, t_start, t_stop;     // Ethernet TX
 reg [31:0] r_next, r_limit, r_start, r_stop;     // Ethernet RX
 reg [31:0] o_next, o_limit, o_start, o_stop;     // sound out
+reg [31:0] p_next, p_limit, p_start, p_stop;     // DSP
 reg [31:0] en_rx_saved_limit;                    // dma.c:852, read at $02004050
 
 wire [31:0] t_end = {2'b00, t_limit[29:0]};      // ENADDR(limit), dma.c:798
@@ -287,6 +305,11 @@ wire [30:0] o_d    = {1'b0, o_limit[31:2]} - {1'b0, o_next[31:2]};
 wire        o_lt   = !o_d[30] && (o_d[29:0] != 30'd0);     // Next < Limit
 wire        o_last = (o_d[29:0] == 30'd1);                  // this word reaches Limit
 assign so_avail    = c_en[C_SNDOUT] && o_lt;
+// DSP, in bytes (dma_dsp_ready): Next < Limit, and the byte that reaches it
+wire [32:0] p_d    = {1'b0, p_limit} - {1'b0, p_next};
+wire        p_lt   = !p_d[32] && (p_d[31:0] != 32'd0);
+wire        p_last = (p_d[31:0] == 32'd1);
+assign dd_avail    = c_en[C_DSP] && p_lt;
 
 assign int_scsi_dma    = c_cmp[C_SCSI];
 assign int_snd_out_dma = c_cmp[C_SNDOUT];
@@ -321,7 +344,7 @@ end
 wire [4:0] ram_idx = is_plain ? {code[2] ? 3'd7 : 3'd0, rsel} :
                      {ch, is_init ? 2'd0 : rsel};
 wire       ch_ff   = (ch == C_SCSI) || (ch == C_ENTX) || (ch == C_ENRX) ||
-                     (ch == C_SNDOUT);                        // pointers in flip-flops
+                     (ch == C_SNDOUT) || (ch == C_DSP);       // pointers in flip-flops
 wire       ram_hit = ((is_ptr || is_init) && !ch_ff) || is_plain;
 wire       ram_we  = stb && we && ram_hit;
 
@@ -348,10 +371,12 @@ wire [31:0] r_ptr_q = (rsel == 2'd0) ? r_next  : (rsel == 2'd1) ? r_limit :
                       (rsel == 2'd2) ? r_start : r_stop;
 wire [31:0] o_ptr_q = (rsel == 2'd0) ? o_next  : (rsel == 2'd1) ? o_limit :
                       (rsel == 2'd2) ? o_start : o_stop;
+wire [31:0] p_ptr_q = (rsel == 2'd0) ? p_next  : (rsel == 2'd1) ? p_limit :
+                      (rsel == 2'd2) ? p_start : p_stop;
 wire [31:0] ff_ptr_q = (ch == C_ENTX) ? t_ptr_q : (ch == C_ENRX) ? r_ptr_q :
-                       (ch == C_SNDOUT) ? o_ptr_q : s_ptr_q;
+                       (ch == C_SNDOUT) ? o_ptr_q : (ch == C_DSP) ? p_ptr_q : s_ptr_q;
 wire [31:0] ff_next  = (ch == C_ENTX) ? t_next  : (ch == C_ENRX) ? r_next  :
-                       (ch == C_SNDOUT) ? o_next : s_next;
+                       (ch == C_SNDOUT) ? o_next : (ch == C_DSP) ? p_next : s_next;
 
 always @(posedge clk) begin
 	if (reset) begin
@@ -375,12 +400,13 @@ end
 //----------------------------------------------------------------------------
 // channel engines and register writes
 //----------------------------------------------------------------------------
-localparam [1:0] O_SCSI = 2'd0, O_ENRX = 2'd1, O_ENTX = 2'd2, O_SNDO = 2'd3;
-reg  [1:0] m_owner;     // whose longword is on the memory master
+localparam [2:0] O_SCSI = 3'd0, O_ENRX = 3'd1, O_ENTX = 3'd2, O_SNDO = 3'd3, O_DSP = 3'd4;
+reg  [2:0] m_owner;     // whose longword is on the memory master
 reg  [2:0] m_n;         // its byte count (Ethernet)
 reg eval_pend;          // an eval arrived while a SCSI word was in flight
 reg orphan;             // the SCSI / sound client dropped its request before the word finished
 reg o_cancel;           // the sound out channel was RESET while its word was in flight
+reg p_cancel;           // the DSP channel was RESET while its byte was in flight
 
 // the TX frame's bytes left in the longword at Next (Next stays on a
 // longword until the frame's last one)
@@ -401,6 +427,8 @@ always @(posedge clk) begin : engine
 	er_ack <= 1'b0;
 	er_err <= 1'b0;
 	so_ack <= 1'b0;
+	dd_ack <= 1'b0;
+	dd_blkend <= 1'b0;
 	if (reset) begin
 		// DMA_Reset (dma.c:1226): every CSR cleared
 		c_en <= 8'd0; c_sup <= 8'd0; c_cmp <= 8'd0; c_bex <= 8'd0; c_dir <= 8'd0;
@@ -408,6 +436,7 @@ always @(posedge clk) begin : engine
 		t_next <= 32'd0; t_limit <= 32'd0; t_start <= 32'd0; t_stop <= 32'd0;
 		r_next <= 32'd0; r_limit <= 32'd0; r_start <= 32'd0; r_stop <= 32'd0;
 		o_next <= 32'd0; o_limit <= 32'd0; o_start <= 32'd0; o_stop <= 32'd0;
+		p_next <= 32'd0; p_limit <= 32'd0; p_start <= 32'd0; p_stop <= 32'd0;
 		en_rx_saved_limit <= 32'd0;
 		er_nibble <= 4'd0;
 		m_req <= 1'b0; m_we <= 1'b0; m_addr <= 30'd0; m_be <= 4'h0; m_wdata <= 32'd0;
@@ -415,22 +444,26 @@ always @(posedge clk) begin : engine
 		sc_rdata <= 32'd0;
 		et_rdata <= 32'd0; et_n <= 3'd0;
 		so_rdata <= 32'd0;
+		dd_rdata <= 8'd0;
 		eval_pend <= 1'b0;
 		orphan <= 1'b0;
 		o_cancel <= 1'b0;
+		p_cancel <= 1'b0;
 	end
 	else begin
 		//------------------------------------------------------------
 		// the memory master: one longword for one client at a time
-		// (SCSI first, then Ethernet RX, then TX, then sound out)
+		// (SCSI first, then Ethernet RX, then TX, then sound out, then DSP)
 		//------------------------------------------------------------
 		if (m_req) begin
-			if ((m_owner == O_SCSI && !sc_req) || (m_owner == O_SNDO && !so_req))
+			if ((m_owner == O_SCSI && !sc_req) || (m_owner == O_SNDO && !so_req) ||
+			    (m_owner == O_DSP && !dd_req))
 				orphan <= 1'b1;
 			if (m_err || m_ack) begin
 				m_req    <= 1'b0;
 				orphan   <= 1'b0;
 				o_cancel <= 1'b0;
+				p_cancel <= 1'b0;
 			end
 			if (m_err) begin
 				// the channel stops with COMPLETE|BUSEXC (dma.c:445-449,
@@ -451,10 +484,15 @@ always @(posedge clk) begin : engine
 					c_en[C_ENTX] <= 1'b0; c_cmp[C_ENTX] <= 1'b1; c_bex[C_ENTX] <= 1'b1;
 					ev[C_ENTX] = 1'b1;
 				end
-				default: begin
+				O_SNDO: begin
 					// sound out: dma.c:714-718 (the client just sees no data)
 					c_en[C_SNDOUT] <= 1'b0; c_cmp[C_SNDOUT] <= 1'b1; c_bex[C_SNDOUT] <= 1'b1;
 					ev[C_SNDOUT] = 1'b1;
+				end
+				default: begin
+					// DSP: dma.c:992-996, 1021-1025
+					c_en[C_DSP] <= 1'b0; c_cmp[C_DSP] <= 1'b1; c_bex[C_DSP] <= 1'b1;
+					ev[C_DSP] = 1'b1;
 				end
 				endcase
 			end
@@ -475,6 +513,24 @@ always @(posedge clk) begin : engine
 					et_rdata <= m_rdata;
 					et_n     <= m_n;
 					t_next   <= t_next + {29'd0, m_n};
+				end
+				O_DSP: if (dd_req && !orphan && !p_cancel) begin
+					// DSP: one byte, then DSP_SetIRQB + dma_interrupt() on
+					// the last (dma.c:998-1001, 1027-1030)
+					dd_ack   <= 1'b1;
+					dd_rdata <= m_rdata[31 - 8 * p_next[1:0] -: 8];
+					p_next   <= p_next + 32'd1;
+					if (p_last) begin
+						dd_blkend <= 1'b1;
+						ev[C_DSP] = 1'b1;
+						c_cmp[C_DSP] <= 1'b1;
+						if (c_sup[C_DSP]) begin
+							c_sup[C_DSP] <= 1'b0;
+							p_next  <= p_start;
+							p_limit <= p_stop;
+						end
+						else c_en[C_DSP] <= 1'b0;
+					end
 				end
 				default: if (so_req && !orphan && !o_cancel) begin
 					// sound out: one frame, then dma_interrupt() on the last
@@ -528,6 +584,14 @@ always @(posedge clk) begin : engine
 			m_addr  <= o_next[31:2];
 			m_be    <= 4'hF;
 			m_wdata <= 32'd0;
+		end
+		else if (dd_req && !dd_ack && dd_avail) begin
+			m_req   <= 1'b1;
+			m_owner <= O_DSP;
+			m_we    <= dd_we;
+			m_addr  <= p_next[31:2];
+			m_be    <= 4'b1000 >> p_next[1:0];         // big-endian byte lane
+			m_wdata <= {4{dd_wdata}};
 		end
 
 		//------------------------------------------------------------
@@ -603,6 +667,8 @@ always @(posedge clk) begin : engine
 					// dma_cancelled); Next stays where the reset found it
 					if (ch == C_SNDOUT && m_req && m_owner == O_SNDO && !m_ack && !m_err)
 						o_cancel <= 1'b1;
+					if (ch == C_DSP && m_req && m_owner == O_DSP && !m_ack && !m_err)
+						p_cancel <= 1'b1;
 				end
 				if (wcmd[1]) c_sup[ch] <= 1'b1;         // SETSUPDATE
 				if (wcmd[0]) begin                      // SETENABLE
@@ -654,6 +720,15 @@ always @(posedge clk) begin : engine
 			if (is_init && ch == C_ENTX) t_next <= merge(t_next, wdata, be);
 			if (is_init && ch == C_ENRX) r_next <= merge(r_next, wdata, be);
 			if (is_init && ch == C_SNDOUT) o_next <= merge(o_next, wdata, be);
+			if (is_ptr && ch == C_DSP) begin
+				case (rsel)
+				2'd0: p_next  <= merge(p_next,  wdata, be);
+				2'd1: p_limit <= merge(p_limit, wdata, be);
+				2'd2: p_start <= merge(p_start, wdata, be);
+				default: p_stop <= merge(p_stop, wdata, be);
+				endcase
+			end
+			if (is_init && ch == C_DSP) p_next <= merge(p_next, wdata, be);
 		end
 	end
 end

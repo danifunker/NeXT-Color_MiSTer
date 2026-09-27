@@ -226,7 +226,7 @@ endfunction
 localparam [3:0] D_NONE = 4'd0, D_DMA = 4'd1, D_ENET = 4'd2, D_INTS = 4'd3,
                  D_INTM = 4'd4, D_ZERO = 4'd5, D_SCR1 = 4'd6, D_SCR2 = 4'd7,
                  D_KMS = 4'd8, D_ESP = 4'd9, D_FLP = 4'd10, D_HCLK = 4'd11,
-                 D_SCC = 4'd12, D_EVC = 4'd13, D_DAC = 4'd14;
+                 D_SCC = 4'd12, D_EVC = 4'd13, D_DAC = 4'd14, D_DSP = 4'd15;
 
 function [3:0] dev_decode;
 	input [16:2] o;
@@ -245,7 +245,7 @@ function [3:0] dev_decode;
 		else if ((a & 17'h1F000) == 17'h06000)                                    dev_decode = D_ENET;  // $1F00F
 		else if ((a & 17'h1F800) == 17'h07000)                                    dev_decode = D_INTS;  // $1F803
 		else if ((a & 17'h1F800) == 17'h07800)                                    dev_decode = D_INTM;
-		else if ((a & 17'h1E003) == 17'h08000)                                    dev_decode = D_ZERO;  // DSP $1E007
+		else if ((a & 17'h1E003) == 17'h08000)                                    dev_decode = D_DSP;   // DSP $1E007
 		else if ((a & 17'h1F000) == 17'h0C000)                                    dev_decode = D_SCR1;  // $1F803 (C000, C800)
 		else if ((a & 17'h1F000) == 17'h0D000)                                    dev_decode = D_SCR2;  // $1F003
 		else if ((a & 17'h1F000) == 17'h0E000)                                    dev_decode = D_KMS;   // $1F00F
@@ -388,8 +388,11 @@ wire dev_rst = !nreset;
 
 wire        kms_power_key;
 wire        int_snd_ovrun;
+wire        int_dsp;                   // INT_DSP_L4 (tc_dsp)
 wire        so_req, so_ack, so_avail;  // tc_kms <-> tc_tdma sound out channel
 wire [31:0] so_rdata;
+wire        dd_req, dd_we, dd_ack, dd_avail, dd_blkend;   // tc_dsp <-> tc_tdma DSP channel
+wire  [7:0] dd_wdata, dd_rdata;
 
 // interrupt sources (levels), Previous sysReg.h bit names (includes/sysReg.h:24-55)
 wire        int_power, int_keymouse, int_timer, int_video, int_tmc_nmi, int_kms_nmi;
@@ -414,7 +417,8 @@ wire [31:0] int_src = {int_tmc_nmi | int_kms_nmi,  // 31 INT_NMI
                        int_snd_in_dma,             // 22 INT_SND_IN_DMA
                        1'b0,                       // 21 INT_SCC_DMA
                        int_dsp_dma,                // 20 INT_DSP_DMA
-                       6'd0,                       // 19..14
+                       5'd0,                       // 19..15
+                       int_dsp,                    // 14 INT_DSP_L4 (tc_dsp: HREQ / TXD)
                        int_video,                  // 13 INT_DISK = TMC video / ADB
                        int_scsi,                   // 12 INT_SCSI (tc_scsi: ENABLE_INT & STAT_INT)
                        1'b0,                       // 11 INT_PRINTER
@@ -429,6 +433,7 @@ wire [31:0] int_src = {int_tmc_nmi | int_kms_nmi,  // 31 INT_NMI
                        softint};                   // 1..0 INT_SOFT2/1
 
 // SCR1 / SCR2 / RTC
+wire [31:0] scr2;                      // SCR2's DSP bits -> tc_dsp
 wire [31:0] scr_rdata;  wire scr_ack;
 tc_scr scr (
 	.clk(clk), .reset(dev_rst), .config_reset(config_reset),
@@ -438,7 +443,7 @@ tc_scr scr (
 	.timestamp(timestamp), .ram_cfg(ram_cfg), .pot_on(pot_on), .boot_cmd(boot_cmd),
 	.power_key(kms_power_key), .int_power(int_power),
 	.led(led), .timer_ipl7(timer_ipl7), .softint(softint),
-	.dsp_reset_n(), .scr2_out()
+	.dsp_reset_n(), .scr2_out(scr2)
 );
 
 // interrupt status / mask
@@ -539,6 +544,8 @@ tc_tdma dma (
 	.er_enable(er_enable), .er_room(er_room), .er_eof(er_eof), .er_full(er_full),
 	.er_nibble(er_nibble),
 	.so_req(so_req), .so_ack(so_ack), .so_rdata(so_rdata), .so_avail(so_avail),
+	.dd_req(dd_req), .dd_we(dd_we), .dd_wdata(dd_wdata), .dd_ack(dd_ack),
+	.dd_rdata(dd_rdata), .dd_avail(dd_avail), .dd_blkend(dd_blkend),
 	.int_scsi_dma(int_scsi_dma), .int_snd_out_dma(int_snd_out_dma),
 	.int_snd_in_dma(int_snd_in_dma), .int_printer_dma(int_printer_dma),
 	.int_dsp_dma(int_dsp_dma), .int_en_tx_dma(int_en_tx_dma), .int_en_rx_dma(int_en_rx_dma)
@@ -565,6 +572,10 @@ tc_scsi #(.CLK_HZ(CLK_HZ)) esp (
 	.flp_done(flp_done)
 );
 
+wire        br_m_req, br_m_we, br_m_ack;   // next_enet_bridge's mailbox port
+wire [28:0] br_m_addr;
+wire [63:0] br_m_wdata;
+
 // AT&T 7213 Ethernet (HS 8): rtl/tc_enet.sv, internal loopback for the
 // POST, and with the OSD's "Connected" a twisted-pair link through
 // NeXT_MiSTer's bridge (rtl/next_enet_bridge.sv) to Main's next_enet daemon
@@ -584,8 +595,8 @@ next_enet_bridge #(.CLK_HZ(CLK_HZ)) enet_bridge (
 	.brx_start(brx_start), .brx_len(brx_len), .brx_valid(brx_valid),
 	.brx_data(brx_data), .brx_ready(brx_ready),
 	.guest_mac(enet_mac),
-	.m_req(enet_m_req), .m_we(enet_m_we), .m_addr(enet_m_addr), .m_wdata(enet_m_wdata),
-	.m_rdata(enet_m_rdata), .m_ack(enet_m_ack)
+	.m_req(br_m_req), .m_we(br_m_we), .m_addr(br_m_addr), .m_wdata(br_m_wdata),
+	.m_rdata(enet_m_rdata), .m_ack(br_m_ack)
 );
 tc_enet enet (
 	.clk(clk), .reset(dev_rst),
@@ -605,6 +616,52 @@ tc_enet enet (
 	.brx_data(brx_data), .brx_ready(brx_ready),
 	.guest_mac(enet_mac)
 );
+
+// DSP56001 host port (Previous ioMemTabTurbo.c:130-137): rtl/tc_dsp.sv, the
+// 68040's side; the DSP runs on the ARM (Main_MiSTer support/next/next_dsp.cpp)
+// behind a DDR3 mailbox at $30400000.
+wire [31:0] dsp_rdata;  wire dsp_ack;
+wire        ds_m_req, ds_m_we;
+wire [28:0] ds_m_addr;
+wire [63:0] ds_m_wdata;
+wire        ds_m_ack;
+tc_dsp #(.CLK_HZ(CLK_HZ)) dsp (
+	.clk(clk), .reset(dev_rst),
+	.stb(io_stb && io_dev == D_DSP && !io_tmc), .we(io_we),
+	.addr2(io_addr[2]), .be(io_be), .wdata(io_wdata),
+	.rdata(dsp_rdata), .ack(dsp_ack),
+	.scr2(scr2), .int_dsp(int_dsp),
+	.dd_req(dd_req), .dd_we(dd_we), .dd_wdata(dd_wdata), .dd_ack(dd_ack),
+	.dd_rdata(dd_rdata), .dd_avail(dd_avail), .dd_blkend(dd_blkend),
+	.m_req(ds_m_req), .m_we(ds_m_we), .m_addr(ds_m_addr), .m_wdata(ds_m_wdata),
+	.m_rdata(enet_m_rdata), .m_ack(ds_m_ack)
+);
+
+// The DDR3 mailbox port (tc_enet_ddr in the top) serves the Ethernet bridge
+// and the DSP link, one 64-bit word at a time.  Both hold m_req until m_ack;
+// an accepted access always completes (tc_enet_ddr), so the grant holds
+// until the acknowledge.  The bridge first.
+reg mb_busy, mb_own;                   // mb_own: 0 bridge, 1 DSP
+always @(posedge clk) begin
+	if (dev_rst) begin
+		mb_busy <= 1'b0;
+		mb_own  <= 1'b0;
+	end
+	else if (!mb_busy) begin
+		if (br_m_req || ds_m_req) begin
+			mb_busy <= 1'b1;
+			mb_own  <= !br_m_req;
+		end
+	end
+	else if (enet_m_ack) mb_busy <= 1'b0;
+end
+assign enet_m_req   = mb_busy && (mb_own ? ds_m_req : br_m_req);
+assign enet_m_we    = mb_own ? ds_m_we    : br_m_we;
+assign enet_m_addr  = mb_own ? ds_m_addr  : br_m_addr;
+assign enet_m_wdata = mb_own ? ds_m_wdata : br_m_wdata;
+assign br_m_ack     = enet_m_ack && mb_busy && !mb_own;
+assign ds_m_ack     = enet_m_ack && mb_busy &&  mb_own;
+
 tc_scc scc (
 	.clk(clk), .reset(dev_rst),
 	.stb(io_stb && io_dev == D_SCC && !io_tmc), .we(io_we),
@@ -691,13 +748,13 @@ always @(posedge clk) begin
 end
 
 wire        io_ack   = tmc_ack | scr_ack | intc_ack | tim_ack | dac_ack | kms_ack |
-                       dma_ack | enet_ack | esp_ack | scc_ack | flp_ack | zero_ack;
+                       dma_ack | enet_ack | esp_ack | scc_ack | flp_ack | dsp_ack | zero_ack;
 wire [31:0] io_rdata = tmc_ack  ? tmc_rdata  : scr_ack  ? scr_rdata  :
                        intc_ack ? intc_rdata : tim_ack  ? tim_rdata  :
                        dac_ack  ? dac_rdata  : kms_ack  ? kms_rdata  :
                        dma_ack  ? dma_rdata  : enet_ack ? enet_rdata :
                        esp_ack  ? esp_rdata  : scc_ack  ? scc_rdata  :
-                       flp_ack  ? flp_rdata  : 32'd0;
+                       flp_ack  ? flp_rdata  : dsp_ack  ? dsp_rdata  : 32'd0;
 wire        io_berr  = tmc_ack && tmc_berr;
 
 //----------------------------------------------------------------------------

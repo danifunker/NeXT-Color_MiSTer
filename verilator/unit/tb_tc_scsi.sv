@@ -105,6 +105,21 @@ always @(posedge clk) if (so_ack) begin
 	so_got.push_back(so_rdata);
 end
 
+// the DSP channel's client (tc_dsp in the machine): one byte per request
+logic        dd_req = 0, dd_we = 0;
+logic  [7:0] dd_wdata = 0;
+wire         dd_ack, dd_avail, dd_blkend;
+wire   [7:0] dd_rdata;
+int          dd_bytes = 0, dd_blkends = 0;
+logic  [7:0] dd_got [$];
+always @(posedge clk) begin
+	if (dd_ack) begin
+		dd_bytes++;
+		dd_got.push_back(dd_rdata);
+	end
+	if (dd_blkend) dd_blkends++;
+end
+
 wire         int_scsi, int_scsi_dma;
 wire         int_snd_out_dma, int_snd_in_dma, int_printer_dma, int_dsp_dma,
              int_en_tx_dma, int_en_rx_dma;
@@ -151,6 +166,8 @@ tc_tdma dma (
 	.er_req(1'b0), .er_wdata(32'd0), .er_n(3'd0), .er_ack(), .er_err(), .er_enable(),
 	.er_room(), .er_eof(1'b0), .er_full(1'b0), .er_nibble(),
 	.so_req(so_req), .so_ack(so_ack), .so_rdata(so_rdata), .so_avail(so_avail),
+	.dd_req(dd_req), .dd_we(dd_we), .dd_wdata(dd_wdata), .dd_ack(dd_ack),
+	.dd_rdata(dd_rdata), .dd_avail(dd_avail), .dd_blkend(dd_blkend),
 	.int_scsi_dma(int_scsi_dma), .int_snd_out_dma(int_snd_out_dma),
 	.int_snd_in_dma(int_snd_in_dma), .int_printer_dma(int_printer_dma),
 	.int_dsp_dma(int_dsp_dma), .int_en_tx_dma(int_en_tx_dma), .int_en_rx_dma(int_en_rx_dma)
@@ -1505,6 +1522,68 @@ initial begin
 		check(so_words == n, "sound: nothing delivered on a bus error");
 		tdma_w(O_CSR, 32'h0010_0000);
 		dma_errs = 0;
+	end
+
+	//------------------------------------------------------------
+	// the DSP channel ($020000D0 / $020040D0..C): single bytes on big-
+	// endian lanes, a chain of two blocks, a block end per block
+	// (dma.c dma_dsp_read_memory / dma_dsp_write_memory / dma_interrupt)
+	//------------------------------------------------------------
+	$display("DSP channel");
+	begin : dspch
+		localparam logic [31:0] DBUF = 32'h0431_0001;   // odd: byte lanes
+		localparam logic [16:0] P_CSR = 17'h000D0, P_NEXT = 17'h040D0, P_LIMIT = 17'h040D4,
+		                        P_START = 17'h040D8, P_STOP = 17'h040DC;
+		int k;
+		bit ok;
+		for (k = 0; k < 4; k++) dram[(DBUF - 1 - DRAM_BASE) / 4 + k] = 32'h00112233 + 32'h44444444 * k;
+		// memory -> DSP: 5 bytes then 3 bytes (chained)
+		dd_got.delete(); dd_blkends = 0;
+		tdma_w(P_CSR, 32'h0010_0000);
+		tdma_w(P_NEXT, DBUF);
+		tdma_w(P_LIMIT, DBUF + 5);
+		tdma_w(P_START, DBUF + 5);
+		tdma_w(P_STOP, DBUF + 8);
+		tdma_w(P_CSR, 32'h0003_0000);              // SETENABLE | SETSUPDATE
+		check(dd_avail, "dsp: channel has data");
+		dd_we = 1'b0; dd_req = 1'b1;
+		wait (dd_got.size() == 5);
+		dd_req = 1'b0;
+		@(posedge clk);
+		tdma_r(P_CSR, v);
+		check(v == 32'h0900_0000, $sformatf("dsp: first block done, chained: CSR %08x", v));
+		check(int_dsp_dma && dd_blkends == 1, "dsp: INT_DSP_DMA and a block end");
+		tdma_w(P_CSR, 32'h0008_0000);              // CLRCOMPLETE
+		dd_req = 1'b1;
+		wait (dd_got.size() == 8);
+		repeat (20) @(posedge clk);
+		dd_req = 1'b0;
+		ok = (dd_got.size() == 8);
+		// bytes from DBUF = $..01: 11 22 33 44 55 66 77 88 (lane order)
+		for (k = 0; k < 8 && ok; k++) ok = (dd_got[k] == 8'(8'h11 * (k + 1)));
+		check(ok, $sformatf("dsp: 8 bytes in memory order: %02x %02x %02x .. %02x",
+		      dd_got[0], dd_got[1], dd_got[2], dd_got[7]));
+		check(dd_blkends == 2 && !dd_avail, "dsp: second block end, channel done");
+		tdma_r(P_CSR, v);
+		check(v == 32'h0800_0000, $sformatf("dsp: all done: CSR %08x", v));
+		// DSP -> memory: 3 bytes from an odd address
+		dram[(DBUF + 32'h10 - 1 - DRAM_BASE) / 4] = 32'h5A5A5A5A;
+		tdma_w(P_CSR, 32'h0010_0000);
+		tdma_w(P_NEXT, DBUF + 32'h10);
+		tdma_w(P_LIMIT, DBUF + 32'h13);
+		tdma_w(P_CSR, 32'h0005_0000);              // SETENABLE | DEV2M
+		dd_we = 1'b1;
+		for (k = 0; k < 3; k++) begin
+			dd_wdata = 8'hA0 + 8'(k);
+			dd_req = 1'b1;
+			wait (dd_ack);
+			@(negedge clk);
+			dd_req = 1'b0;
+			@(negedge clk);
+		end
+		check(dram[(DBUF + 32'h10 - 1 - DRAM_BASE) / 4] == 32'h5AA0A1A2,
+		      $sformatf("dsp: bytes written on their lanes: %08x", dram[(DBUF + 32'h10 - 1 - DRAM_BASE) / 4]));
+		tdma_w(P_CSR, 32'h0010_0000);
 	end
 
 	//------------------------------------------------------------

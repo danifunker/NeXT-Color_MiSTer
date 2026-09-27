@@ -61,6 +61,16 @@ wire [10:0] ma = addr[10:0];
 reg         rd_mb = 0;
 reg  [10:0] rd_maddr = 0;
 integer     tx_frames = 0, k;
+
+// The DSP link mailbox (rtl/tc_dsp.sv, Main_MiSTer support/next/next_dsp.cpp:
+// ARM byte $30400000, 16 KB = word $06080000..$060807FF).  Plain memory
+// here: with no DSP daemon the ARM word never names the FPGA's generation,
+// so tc_dsp keeps dropping its messages, as on a MiSTer without the daemon.
+localparam [28:0] DLINK = 29'h0608_0000;
+reg  [63:0] dl [0:2047];
+initial for (i = 0; i < 2048; i = i + 1) dl[i] = 64'd0;
+wire        in_dl = (addr[28:11] == DLINK[28:11]);
+reg         rd_dl = 0;
 reg  [63:0] rxw, rxr;
 
 always @(posedge clk) begin
@@ -92,14 +102,16 @@ always @(posedge clk) begin
 				end
 			end
 		end
+		else if (we && in_dl) dl[ma] <= din;
 		else if (we) begin
 			if (!in_win) $display("[DDR3] write outside the VRAM window: %07X", addr);
 			else for (i = 0; i < 8; i = i + 1)
 				if (be[i]) mem[a][8*i +: 8] <= din[8*i +: 8];
 		end
 		if (rd) begin
-			if (!in_win && !in_mb) $display("[DDR3] read outside the VRAM window: %07X", addr);
+			if (!in_win && !in_mb && !in_dl) $display("[DDR3] read outside the VRAM window: %07X", addr);
 			rd_mb    <= in_mb;
+			rd_dl    <= in_dl;
 			rd_maddr <= ma;
 			if (rd_pend) $display("[DDR3] second read issued while one is outstanding");
 			rd_pend <= 1;
@@ -112,7 +124,7 @@ always @(posedge clk) begin
 	if (rd_pend) begin
 		if (rd_wait > 0) rd_wait <= rd_wait - 1;
 		else begin
-			dout       <= rd_mb ? mb[rd_maddr] : mem[rd_addr];
+			dout       <= rd_mb ? mb[rd_maddr] : rd_dl ? dl[rd_maddr] : mem[rd_addr];
 			rd_maddr   <= rd_maddr + 1'b1;
 			dout_ready <= 1;
 			rd_addr    <= rd_addr + 1'b1;

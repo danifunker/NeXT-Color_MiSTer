@@ -69,6 +69,7 @@ V_SRC = \
 	$(RTL)/tc_enet.sv \
 	$(RTL)/tc_scc.sv \
 	$(RTL)/tc_tdma.sv \
+	$(RTL)/tc_dsp.sv \
 	$(RTL)/tc_scsi.sv \
 	$(RTL)/next_floppy.sv \
 	$(RTL)/next_enet_bridge.sv \
