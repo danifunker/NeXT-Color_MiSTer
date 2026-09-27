@@ -68,6 +68,20 @@ are listed in the MiSTer.ini that ships with MiSTer (for example `9` is
   finds no disk.
 * Disk images are written to: work on a copy.
 
+## Sound and DSP
+
+* **Sound out** plays through the MiSTer's HDMI / analog audio (16-bit
+  stereo, 44.1 kHz; 22.05 kHz sounds are doubled as on the real machine;
+  the keyboard's volume keys work).  There is no sound input (no microphone
+  CODEC) and no DSP port (the DSP's serial ports have no connector here).
+* **The DSP56001 runs on the MiSTer's ARM**, in the DSP interpreter of the
+  Previous emulator, inside Main: the FPGA answers the 68040's side of the
+  DSP host port and passes the traffic to the ARM through DDR3.  It needs
+  the `next-color` build of Main_MiSTer (see Disks).  It runs at roughly
+  1.5 million DSP instructions per second, about an eighth of a real
+  25 MHz 56001: programs that use the DSP work, but heavy real-time work
+  (Music Kit synthesis) runs slower than on the real machine.
+
 The notes below come from the MiSTer template and describe the standard core layout. `<core_name>` is `NeXT-Color`.
 
 ## Source structure
