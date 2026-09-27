@@ -10285,10 +10285,17 @@ always @(posedge clk) begin
 			// the fetch is re-issued when execution actually reaches it, and
 			// faults again there with the live context.
 			ifr_req  <= 0;
-			// the frame builder (aerr_start) reads the faulting request from
-			// the mem_* registers: carry the fetch's over (P171)
-			mem_addr_q <= ifr_addr; mem_size <= ifr_size; fc_r <= ifr_fc;
-			mem_write <= 0; mem_instr_q <= 1;
+			// The frame builder (aerr_start(1)) reads the faulting request
+			// from the ifr_* registers (P171).  The mem_*/fc_r registers
+			// belong to the data channel and must NOT be overwritten here:
+			// a fault on a fetch made ahead of demand (only recorded below)
+			// can land while a data access is in flight -- e.g. the return
+			// address push of a `jsr` in the last word of a page, whose
+			// sequential prefetch crosses into an unmapped page.  Copying
+			// the fetch over turned that push into an instruction-space read
+			// and its fault frame reported FA = the push address with the
+			// fetch's TM, so RTE restarted the jsr and the fault repeated
+			// forever (NeXTSTEP `cc` hang, open question 39).
 			epf_pend <= 0;
 			epf_kill <= 0;
 			if (epf_kill || epf_flushed) begin

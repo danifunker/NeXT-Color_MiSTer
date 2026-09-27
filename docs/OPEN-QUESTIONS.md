@@ -160,3 +160,26 @@ and what would settle it. "HS n" = `rom-dissassembly/hardware-summary.md` sectio
     artefact of those trees (the mono core compiles fine on hardware).  The
     fix is in ap040_core.v's early-prefetch fault handling (CPU core code:
     needs the user's go-ahead).
+    **FIXED (2026-09-26, user-authorized CPU change)**: `ap040_core.v`'s
+    queue-fetch fault branch copied the faulting fetch into the data
+    channel's `mem_addr_q/mem_size/fc_r/mem_write/mem_instr_q`
+    unconditionally -- also when the fault was only recorded (`epf_err`,
+    fetched ahead of demand) and a data access (the jsr's push) was in
+    flight.  `aerr_start(1)` builds the frame from `ifr_*`, so the copy had
+    no consumer; removed.  `run_pageend.sh`: cases 1-5 give exactly one
+    fault with the real-040 shape (case 1: FA $6000, SSW $0506, PC $6000);
+    the tree's tb/asm suite is unchanged (29 pass before and after).
+    The "re-fault at $6000" of the mono/upstream trees was **a Verilator
+    artefact**: the MMU's 128-entry `atc_v[k] <= 0` loop (PFLUSHA) exceeds
+    `--unroll-count 64` and is silently dropped (BLKLOOPINIT), so PFLUSHA
+    never cleared the ATC in any Verilator build here (this also explained
+    5 tb/asm failures: t_mmu 60, t_atcprobe, t_bitfield_mmu, t_movem_restart,
+    t_moves_fc).  Fixed with `--unroll-count 256` in verilator/Makefile and
+    verilator/cpu/*.sh.  Case 6 fails a bench FC check: see 40.
+40. **Bench FC check in `t_pageend` case 6** (caches on, target page invalid):
+    `tb_ap040_program.v` reports "exception/reset data cycle used FC=1,
+    expected 5" -- a supervisor-stack READ of $3BFC in core state 111 during
+    the access-error entry with a stale `fc_r=1`.  Pre-existing and identical
+    in the mono tree (NeXT_MiSTer); upstream `C:\Temp\mistercore\AP68040`
+    passes all 8 cases.  Not the cc hang (the mono core runs NeXTSTEP with
+    it).  Settle: diff that state's FC source against upstream.

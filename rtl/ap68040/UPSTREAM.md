@@ -62,8 +62,28 @@ NeXT_MiSTer CPU survey that tree equals `alanswx/wombat33_MiSTer` HEAD `6c8bfe9`
 (`../old-quadra`) except one line in `ap040_core.v` (`brf_seed_a = 5'bxxxxx`).
 The `8778213` in the table above is stale in both Quadra and NeXT_MiSTer.
 
-**The core, MMU and cache are untouched here** (user, 2026-09-26: no CPU code
-changes for now). What NeXT_MiSTer's `docs/CPU_NEXT_PORT.md` needed:
+**One local change to the core** (2026-09-26, user-authorized for this bug
+only; otherwise no CPU code changes): `rtl/ap040_core.v`, the queue-fetch
+fault branch (`else if (epf_pend && i_err)`, ~line 10280) no longer copies
+the faulting fetch into the data channel's `mem_addr_q/mem_size/fc_r/
+mem_write/mem_instr_q`.  `aerr_start(1)` builds the frame from `ifr_*`
+(P171), so the copy had no consumer, and it corrupted an in-flight data
+access when a fetch made ahead of demand faulted: a `jsr` in the last word
+of a page whose next page is unmapped got an access error with FA = its own
+return-address push, TM = code, PC = the `jsr` -- an endless fault loop
+(NeXTSTEP `cc` hang, open question 39).  Regression test:
+`verilator/cpu/t_pageend.s` via `verilator/cpu/run_pageend.sh`; the tree's
+own `tb/asm` suite is unchanged (`verilator/cpu/run_asm_regress.sh`).
+**Upstream candidate**: MacQuadra800 / wombat33 / NeXT_MiSTer carry the same
+copy (`mem_addr_q <= ifr_addr; ... mem_instr_q <= 1;`).
+
+Also found: under Verilator the MMU's `for (k = 0; k < 128; ...) atc_v[k] <= 0`
+(PFLUSHA, reset) exceeds the default `--unroll-count 64` and is silently
+dropped (BLKLOOPINIT), so PFLUSHA was a no-op in every Verilator build --
+build with `--unroll-count 256` (verilator/Makefile, verilator/cpu/*.sh).
+Icarus (the tree's run_tests.sh) and Quartus are unaffected.
+
+What NeXT_MiSTer's `docs/CPU_NEXT_PORT.md` needed:
 
 | item | here |
 |---|---|

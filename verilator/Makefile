@@ -23,7 +23,11 @@ V_DEFINE += -Wno-fatal -Wno-WIDTH -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-IMPLICIT
 	-Wno-COMBDLY -Wno-INITIALDLY -Wno-SYNCASYNCNET -Wno-BLKLOOPINIT \
 	-Wno-MULTIDRIVEN -Wno-GENUNNAMED -Wno-BLKSEQ -Wno-DECLFILENAME
 V_DEFINE += --timing
-V_OPT = --x-assign fast --x-initial fast --noassert -O3
+# --unroll-count: ap040_mmu.v clears the 128 ATC valid flops with a for loop of
+# delayed assignments (PFLUSHA, reset); above Verilator's default of 64 the loop
+# is not unrolled and the assignment is silently dropped (BLKLOOPINIT), so
+# PFLUSHA was a no-op in the sim (found 2026-09-26, open question 39).
+V_OPT = --x-assign fast --x-initial fast --noassert -O3 --unroll-count 256
 
 # The HPS side of the SD slots (host/host_dpi.cpp) runs Main_MiSTer's own
 # support/next sources, copied with the shim headers (host/shim) into

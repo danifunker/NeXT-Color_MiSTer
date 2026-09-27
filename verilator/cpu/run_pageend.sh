@@ -29,11 +29,12 @@ for cfg in plain experimental; do
 	defs=""
 	[ "$cfg" = experimental ] && defs="-DAP040_EXPERIMENTAL_XSTORE=1 -DAP040_EXPERIMENTAL_LEA=1"
 	echo "== build ($cfg)"
-	# warning set of verilator/Makefile (the full-machine sim builds this CPU)
+	# warning set of verilator/Makefile (the full-machine sim builds this CPU);
+	# --unroll-count 256: see the note in verilator/Makefile (PFLUSHA's 128-entry loop)
 	verilator --binary --timing -Wno-fatal -Wno-lint -Wno-style -Wno-TIMESCALEMOD -Wno-INITIALDLY \
 		-Wno-BLKLOOPINIT -Wno-MULTIDRIVEN -Wno-COMBDLY -Wno-BLKSEQ -Wno-UNOPTFLAT -Wno-LATCH \
 		-Wno-SIDEEFFECT --timescale-override 1ps/1ps \
-		--x-assign fast -O2 -j 0 $defs -I"$CPU/rtl" --top-module tb_ap040_program \
+		--x-assign fast -O2 -j 0 --unroll-count 256 $defs -I"$CPU/rtl" --top-module tb_ap040_program \
 		-Mdir "$OUT/obj_$cfg" -o tb_prog "$CPU/tb/tb_ap040_program.v" $SRC \
 		> "$OUT/build_$cfg.log" 2>&1 || { tail -30 "$OUT/build_$cfg.log"; exit 1; }
 	echo "== run ($cfg)"
