@@ -94,7 +94,27 @@ module tc_enet
 	input       [3:0] er_nibble,
 
 	output            int_en_tx,       // status bit 10
-	output            int_en_rx        // status bit 9
+	output            int_en_rx,       // status bit 9
+
+	// The network (rtl/next_enet_bridge.sv to Main's next_enet daemon).
+	// connected = the OSD "Ethernet: Connected": a twisted-pair link, so the
+	// chip is on the wire when the guest selects TPE (new_enet_state,
+	// ethernet.c:628-643, bTwistedPair) and BADTPE reads clear
+	// (EN_Control_Read, ethernet.c:588-597).
+	input             connected,
+	output reg        btx_req,         // a frame to send: the bridge reads the buffer
+	output reg [10:0] btx_len,
+	input      [10:0] btx_addr,
+	input             btx_rd,
+	output      [7:0] btx_q,
+	output            btx_ack,
+	input             btx_done,
+	input             brx_start,       // a received frame, then brx_len bytes
+	input      [10:0] brx_len,
+	input             brx_valid,
+	input       [7:0] brx_data,
+	output            brx_ready,
+	output     [47:0] guest_mac        // the node ID, for the host's MAC filter
 );
 
 localparam [7:0] TX_READY = 8'h80, TX_NET_BUSY = 8'h40, TX_RECVD = 8'h20,
@@ -106,7 +126,10 @@ reg        in_reset;                                     // +6 bit 7
 reg  [7:0] mac [0:5];
 
 wire loopback = tx_mode[1];                                // new_enet_state: LOOP first
-wire badtpe   = tx_mode[2];                                // TPE and no twisted-pair link
+wire badtpe   = tx_mode[2] && !connected;                  // TPE and no twisted-pair link
+wire on_wire  = !loopback && tx_mode[2] && connected;      // EN_TWISTEDPAIR
+
+assign guest_mac = {mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]};
 
 assign int_en_tx = |(tx_status & tx_mask);
 assign int_en_rx = |(rx_status & rx_mask);
@@ -153,9 +176,12 @@ endfunction
 //----------------------------------------------------------------------------
 // the data path
 //----------------------------------------------------------------------------
-localparam [2:0] E_IDLE = 3'd0, E_TX = 3'd1, E_SEND = 3'd2, E_RXRD = 3'd3,
-                 E_RXREQ = 3'd4, E_RXCHK = 3'd5, E_RXWAIT = 3'd6;
-reg   [2:0] est;
+localparam [3:0] E_IDLE = 4'd0, E_TX = 4'd1, E_SEND = 4'd2, E_RXRD = 4'd3,
+                 E_RXREQ = 4'd4, E_RXCHK = 4'd5, E_RXWAIT = 4'd6,
+                 E_BTX = 4'd7,    // the bridge reads the frame out of the buffer
+                 E_BRX = 4'd8,    // a frame from the network streams into it
+                 E_BRXEND = 4'd9;
+reg   [3:0] est;
 reg  [11:0] tx_len;          // bytes read (at most the buffer's 2048 are kept)
 reg  [11:0] rx_len;          // bytes to store: frame + CRC, at least 64
 reg  [11:0] pos;             // bytes stored so far
@@ -174,6 +200,28 @@ wire [31:0] rx_word = {(pos + 12'd0 < tx_len) ? fq[31:24] : 8'h00,
                        (pos + 12'd3 < tx_len) ? fq[7:0]   : 8'h00};
 wire [11:0] tx_len4 = tx_len + 12'd4;
 
+// The bridge's buffer reads: address on btx_rd, the byte two clocks later
+// with btx_ack (f_raddr, then the registered fq).  E_BTX is the only user
+// of the read port then.
+reg        b_p1, b_p2;
+reg  [1:0] b_lane1, b_lane2;
+assign btx_ack = b_p2;
+assign btx_q   = (b_lane2 == 2'd0) ? fq[31:24] : (b_lane2 == 2'd1) ? fq[23:16] :
+                 (b_lane2 == 2'd2) ? fq[15:8]  : fq[7:0];
+
+// A frame from the network is taken only while the chip is on the wire and
+// idle (Previous: enet_output from RECV_STATE_WAITING in the TP state).  The
+// bridge samples this once per frame; a start that finds the engine busy
+// after all (a transmit began in between) drops that frame, as a busy
+// receiver would.
+assign brx_ready = on_wire && !in_reset && est == E_IDLE;
+reg  [31:0] bw;              // the longword being assembled
+reg  [10:0] brx_n;           // its length
+wire [31:0] bw_next = (pos[1:0] == 2'd0) ? {brx_data, 24'd0} :
+                      (pos[1:0] == 2'd1) ? {bw[31:24], brx_data, 16'd0} :
+                      (pos[1:0] == 2'd2) ? {bw[31:16], brx_data, 8'd0} :
+                                           {bw[31:8], brx_data};
+
 integer i;
 always @(posedge clk) begin
 	ack     <= 1'b0;
@@ -191,14 +239,27 @@ always @(posedge clk) begin
 		tx_len <= 12'd0; rx_len <= 12'd0; pos <= 12'd0; dst <= 48'd0;
 		f_waddr <= 9'd0; f_raddr <= 9'd0; f_wdata <= 32'd0;
 		rdata <= 32'd0;
+		btx_req <= 1'b0; btx_len <= 11'd0;
+		b_p1 <= 1'b0; b_p2 <= 1'b0; b_lane1 <= 2'd0; b_lane2 <= 2'd0;
+		bw <= 32'd0; brx_n <= 11'd0;
 	end
 	else begin
+		b_p1    <= 1'b0;
+		b_p2    <= b_p1;
+		b_lane2 <= b_lane1;
 		//------------------------------------------------------------
 		// data path
 		//------------------------------------------------------------
 		case (est)
 		E_IDLE: begin
-			if (!in_reset && tx_mode[7] && !tx_status[6] && et_enable) begin
+			if (brx_start && brx_ready) begin
+				// a frame from the network (enet_output -> enet_receive)
+				brx_n <= brx_len;
+				pos   <= 12'd0;
+				dst   <= 48'd0;
+				est   <= E_BRX;
+			end
+			else if (!in_reset && tx_mode[7] && !tx_status[6] && et_enable) begin
 				tx_len  <= 12'd0;
 				f_waddr <= 9'd0;
 				et_req  <= et_room;
@@ -238,7 +299,14 @@ always @(posedge clk) begin
 			// then TXSTAT_READY
 			est <= E_IDLE;
 			if (tx_len != 12'd0) begin
-				if (!loopback)
+				if (on_wire) begin
+					// enet_send: the bridge copies the frame to Main's TX ring
+					// (at most 1600 bytes, the daemon's MAX_FRAME)
+					btx_req <= 1'b1;
+					btx_len <= (tx_len > 12'd1600) ? 11'd1600 : tx_len[10:0];
+					est     <= E_BTX;
+				end
+				else if (!loopback)
 					tx_status <= tx_status | TX_16COLLS | TX_READY;
 				else if (for_me) begin
 					tx_status <= tx_status | TX_NET_BUSY | TX_READY;
@@ -248,6 +316,45 @@ always @(posedge clk) begin
 				end
 				else tx_status <= tx_status | TX_READY;
 			end
+		end
+		E_BTX: begin
+			if (btx_rd) begin
+				f_raddr <= btx_addr[10:2];
+				b_lane1 <= btx_addr[1:0];
+				b_p1    <= 1'b1;
+			end
+			if (btx_done) begin
+				btx_req   <= 1'b0;
+				tx_status <= tx_status | TX_READY;
+				est       <= E_IDLE;
+			end
+		end
+		E_BRX: begin
+			// store the frame at offset 0 of the buffer, as a loopback one
+			if (brx_valid) begin
+				bw <= bw_next;
+				if (pos[1:0] == 2'd3 || pos + 12'd1 == {1'b0, brx_n}) begin
+					f_we    <= 1'b1;
+					f_waddr <= pos[10:2];
+					f_wdata <= bw_next;
+				end
+				if (pos < 12'd6) dst[47 - 8 * pos[2:0] -: 8] <= brx_data;
+				pos <= pos + 12'd1;
+				if (pos + 12'd1 == {1'b0, brx_n}) est <= E_BRXEND;
+			end
+		end
+		E_BRXEND: begin
+			// enet_receive (ethernet.c:418-431): the filter, then the frame
+			// + CRC, at least 64 bytes, through the receive path below.
+			// tx_len is the stored length there (bytes past it read 0).
+			tx_len <= {1'b0, brx_n};
+			pos    <= 12'd0;
+			if (for_me) begin
+				tx_status <= tx_status | TX_NET_BUSY;
+				rx_len    <= ({1'b0, brx_n} + 12'd4 < 12'd64) ? 12'd64 : {1'b0, brx_n} + 12'd4;
+				est       <= E_RXCHK;
+			end
+			else est <= E_IDLE;
 		end
 		E_RXWAIT: begin
 			// tc_tdma chains on the clock that sees er_full
@@ -282,9 +389,10 @@ always @(posedge clk) begin
 				pos    <= pos + {9'd0, er_n};
 				if (pos + {9'd0, er_n} >= rx_len) begin
 					// ethernet.c:687-695 with dma.c:850-868
+					// TX_RECVD only in loopback (new_enet_io, ethernet.c:687-693)
 					er_eof    <= 1'b1;
 					rx_status <= rx_status | RX_PKT_OK;
-					tx_status <= (tx_status & ~TX_NET_BUSY) | TX_RECVD;
+					tx_status <= (tx_status & ~TX_NET_BUSY) | (loopback ? TX_RECVD : 8'h00);
 					est       <= E_IDLE;
 				end
 				else if (!er_room) begin

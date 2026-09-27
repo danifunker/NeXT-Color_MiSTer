@@ -70,6 +70,9 @@ V_SRC = \
 	$(RTL)/tc_tdma.sv \
 	$(RTL)/tc_scsi.sv \
 	$(RTL)/next_floppy.sv \
+	$(RTL)/next_enet_bridge.sv \
+	$(RTL)/next_ddram_arb.sv \
+	$(RTL)/tc_enet_ddr.sv \
 	$(RTL)/wombat_cpu.sv \
 	$(RTL)/wombat_store_buffer.sv \
 	$(RTL)/wombat_bus32.sv \

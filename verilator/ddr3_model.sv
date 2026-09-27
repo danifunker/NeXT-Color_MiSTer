@@ -48,18 +48,59 @@ reg  [15:0]  lfsr = 16'hACE1;
 wire [AW-1:0] a = addr[AW-1:0];
 wire          in_win = (addr[28:AW] == BASE[28:AW]);
 
+// The Ethernet mailbox (Main_MiSTer support/next/next_enet.cpp: ARM byte
+// $1FF00000, 16 KB = word $03FE0000..$03FE07FF), written by the core's
+// next_enet_bridge.  In place of Main's daemon the model plays a network
+// that echoes: each frame the guest sends (TX_WPTR write) is copied into
+// the next RX slot and RX_WPTR advanced, while the RX ring has room.
+localparam [28:0] MBOX = 29'h03FE_0000;
+reg  [63:0] mb [0:2047];
+initial for (i = 0; i < 2048; i = i + 1) mb[i] = 64'd0;
+wire        in_mb = (addr[28:11] == MBOX[28:11]);
+wire [10:0] ma = addr[10:0];
+reg         rd_mb = 0;
+reg  [10:0] rd_maddr = 0;
+integer     tx_frames = 0, k;
+reg  [63:0] rxw, rxr;
+
 always @(posedge clk) begin
 	lfsr <= {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
 	dout_ready <= 0;
 
 	if (!busy) begin
-		if (we) begin
+		if (we && in_mb) begin
+			mb[ma] <= din;
+			if (ma == 11'd3) $display("[ENET] RX slot consumed by the core (RX_RPTR %0d)", din);
+			if (ma == 11'd1 && din != 64'd0) begin
+				// TX_WPTR: frame din-1 is in TX slot (din-1)&3
+				tx_frames = tx_frames + 1;
+				rxw = mb[2]; rxr = mb[3];
+				$display("[ENET] TX frame %0d: %0d bytes, dst %012X src %012X type %04X%s",
+				         din, mb[11'h100 + {(din[1:0] - 2'd1), 8'd0}][10:0],
+				         {mb[11'h101 + {(din[1:0] - 2'd1), 8'd0}][7:0],   mb[11'h101 + {(din[1:0] - 2'd1), 8'd0}][15:8],
+				          mb[11'h101 + {(din[1:0] - 2'd1), 8'd0}][23:16], mb[11'h101 + {(din[1:0] - 2'd1), 8'd0}][31:24],
+				          mb[11'h101 + {(din[1:0] - 2'd1), 8'd0}][39:32], mb[11'h101 + {(din[1:0] - 2'd1), 8'd0}][47:40]},
+				         {mb[11'h101 + {(din[1:0] - 2'd1), 8'd0}][55:48], mb[11'h101 + {(din[1:0] - 2'd1), 8'd0}][63:56],
+				          mb[11'h102 + {(din[1:0] - 2'd1), 8'd0}][7:0],   mb[11'h102 + {(din[1:0] - 2'd1), 8'd0}][15:8],
+				          mb[11'h102 + {(din[1:0] - 2'd1), 8'd0}][23:16], mb[11'h102 + {(din[1:0] - 2'd1), 8'd0}][31:24]},
+				         {mb[11'h102 + {(din[1:0] - 2'd1), 8'd0}][39:32], mb[11'h102 + {(din[1:0] - 2'd1), 8'd0}][47:40]},
+				         (rxw - rxr < 64'd4) ? " -> echoed" : " (RX ring full)");
+				if (rxw - rxr < 64'd4) begin
+					for (k = 0; k < 256; k = k + 1)
+						mb[11'h500 + {rxw[1:0], 8'd0} + k] <= mb[11'h100 + {(din[1:0] - 2'd1), 8'd0} + k];
+					mb[2] <= rxw + 64'd1;
+				end
+			end
+		end
+		else if (we) begin
 			if (!in_win) $display("[DDR3] write outside the VRAM window: %07X", addr);
 			else for (i = 0; i < 8; i = i + 1)
 				if (be[i]) mem[a][8*i +: 8] <= din[8*i +: 8];
 		end
 		if (rd) begin
-			if (!in_win) $display("[DDR3] read outside the VRAM window: %07X", addr);
+			if (!in_win && !in_mb) $display("[DDR3] read outside the VRAM window: %07X", addr);
+			rd_mb    <= in_mb;
+			rd_maddr <= ma;
 			if (rd_pend) $display("[DDR3] second read issued while one is outstanding");
 			rd_pend <= 1;
 			rd_left <= burstcnt;
@@ -71,7 +112,8 @@ always @(posedge clk) begin
 	if (rd_pend) begin
 		if (rd_wait > 0) rd_wait <= rd_wait - 1;
 		else begin
-			dout       <= mem[rd_addr];
+			dout       <= rd_mb ? mb[rd_maddr] : mem[rd_addr];
+			rd_maddr   <= rd_maddr + 1'b1;
 			dout_ready <= 1;
 			rd_addr    <= rd_addr + 1'b1;
 			rd_left    <= rd_left - 8'd1;

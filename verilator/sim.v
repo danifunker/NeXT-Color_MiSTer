@@ -205,6 +205,13 @@ tc_machine machine
 	.fsd_wr(fsd_wr),
 	.fsd_ack(fsd_ack),
 	.fsd_buff_din(fsd_buff_din),
+	.enet_connected(enet_connected),
+	.enet_m_req(enet_m_req),
+	.enet_m_we(enet_m_we),
+	.enet_m_addr(enet_m_addr),
+	.enet_m_wdata(enet_m_wdata),
+	.enet_m_rdata(enet_m_rdata),
+	.enet_m_ack(enet_m_ack),
 
 	.led(led),
 	.reset_req(reset_req),
@@ -245,6 +252,17 @@ wire        SDRAM_DQML, SDRAM_DQMH;
 wire  [1:0] SDRAM_BA;
 wire        SDRAM_nCS, SDRAM_nWE, SDRAM_nRAS, SDRAM_nCAS, SDRAM_CKE, SDRAM_CLK;
 
+// +enet: the OSD "Ethernet: Connected" (the DDR3 model echoes each frame
+// the guest sends back to it as a received one, see ddr3_model.sv)
+reg         enet_connected = 1'b0;
+initial if ($test$plusargs("enet")) enet_connected = 1'b1;
+wire        enet_m_req, enet_m_we, enet_m_ack;
+wire [28:0] enet_m_addr;
+wire [63:0] enet_m_wdata, enet_m_rdata;
+wire        va_busy, va_dout_ready, va_rd, va_we;
+wire  [7:0] va_burstcnt, va_be;
+wire [28:0] va_addr;
+wire [63:0] va_dout, va_din;
 wire        DDRAM_BUSY;
 wire  [7:0] DDRAM_BURSTCNT;
 wire [28:0] DDRAM_ADDR;
@@ -313,15 +331,27 @@ tc_memsys memsys
 	.SDRAM_CKE(SDRAM_CKE),
 	.SDRAM_CLK(SDRAM_CLK),
 
-	.DDRAM_BUSY(DDRAM_BUSY),
-	.DDRAM_BURSTCNT(DDRAM_BURSTCNT),
-	.DDRAM_ADDR(DDRAM_ADDR),
-	.DDRAM_DOUT(DDRAM_DOUT),
-	.DDRAM_DOUT_READY(DDRAM_DOUT_READY),
-	.DDRAM_RD(DDRAM_RD),
-	.DDRAM_DIN(DDRAM_DIN),
-	.DDRAM_BE(DDRAM_BE),
-	.DDRAM_WE(DDRAM_WE)
+	.DDRAM_BUSY(va_busy),
+	.DDRAM_BURSTCNT(va_burstcnt),
+	.DDRAM_ADDR(va_addr),
+	.DDRAM_DOUT(va_dout),
+	.DDRAM_DOUT_READY(va_dout_ready),
+	.DDRAM_RD(va_rd),
+	.DDRAM_DIN(va_din),
+	.DDRAM_BE(va_be),
+	.DDRAM_WE(va_we)
+);
+
+tc_enet_ddr enet_ddr
+(
+	.clk_sys(clk_sys), .clk_ram(clk_ram), .reset_ram(reset),
+	.s_req(enet_m_req), .s_we(enet_m_we), .s_addr(enet_m_addr), .s_wdata(enet_m_wdata),
+	.s_rdata(enet_m_rdata), .s_ack(enet_m_ack),
+	.a_busy(va_busy), .a_burstcnt(va_burstcnt), .a_addr(va_addr), .a_dout(va_dout),
+	.a_dout_ready(va_dout_ready), .a_rd(va_rd), .a_din(va_din), .a_be(va_be), .a_we(va_we),
+	.DDRAM_BUSY(DDRAM_BUSY), .DDRAM_BURSTCNT(DDRAM_BURSTCNT), .DDRAM_ADDR(DDRAM_ADDR),
+	.DDRAM_DOUT(DDRAM_DOUT), .DDRAM_DOUT_READY(DDRAM_DOUT_READY), .DDRAM_RD(DDRAM_RD),
+	.DDRAM_DIN(DDRAM_DIN), .DDRAM_BE(DDRAM_BE), .DDRAM_WE(DDRAM_WE)
 );
 
 // MiSTer 128 MB modules: two 64 MB ranks, the second selected by the
@@ -462,6 +492,15 @@ always @(posedge clk_sys) begin
 		end
 		else sd_rphase <= 1;
 	end
+end
+
+// Ethernet receive trace: a frame from the bridge, and its hand-over to RX DMA
+always @(posedge clk_sys) begin
+	if (machine.enet.brx_start)
+		$display("[ENET] RX frame from the bridge: %0d bytes%s", machine.enet.brx_len,
+		         machine.enet.brx_ready ? "" : " -- dropped (receiver busy)");
+	if (machine.enet.er_eof)
+		$display("[ENET] RX frame stored by DMA (%0d bytes with CRC)", machine.enet.rx_len);
 end
 
 // ---------------------------------------------------------------- ROM

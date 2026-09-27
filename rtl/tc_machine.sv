@@ -118,6 +118,16 @@ module tc_machine
 	input             fsd_ack,
 	output      [7:0] fsd_buff_din,
 
+	// Ethernet: the OSD "Connected" switch, and the bridge's mailbox port
+	// (one 64-bit DDR3 word at a time, clk_sys; tc_enet_ddr in the top)
+	input             enet_connected,
+	output            enet_m_req,
+	output            enet_m_we,
+	output     [28:0] enet_m_addr,
+	output     [63:0] enet_m_wdata,
+	input      [63:0] enet_m_rdata,
+	input             enet_m_ack,
+
 	output            led,
 	output            reset_req,          // KMS magic reset: the top resets the machine
 
@@ -546,8 +556,27 @@ tc_scsi #(.CLK_HZ(CLK_HZ)) esp (
 );
 
 // AT&T 7213 Ethernet (HS 8): rtl/tc_enet.sv, internal loopback for the
-// POST; no network attachment yet.  Its data moves through tc_tdma's
+// POST, and with the OSD's "Connected" a twisted-pair link through
+// NeXT_MiSTer's bridge (rtl/next_enet_bridge.sv) to Main's next_enet daemon
+// (a DDR3 mailbox at $1FF00000).  Its data moves through tc_tdma's
 // Ethernet TX/RX channels.
+wire        btx_req, btx_rd, btx_ack, btx_done;
+wire [10:0] btx_len, btx_addr;
+wire  [7:0] btx_q;
+wire        brx_start, brx_valid, brx_ready;
+wire [10:0] brx_len;
+wire  [7:0] brx_data;
+wire [47:0] enet_mac;
+next_enet_bridge #(.CLK_HZ(CLK_HZ)) enet_bridge (
+	.clk(clk), .reset(dev_rst), .enable(enet_connected),
+	.btx_req(btx_req), .btx_len(btx_len), .btx_addr(btx_addr), .btx_rd(btx_rd),
+	.btx_q(btx_q), .btx_ack(btx_ack), .btx_done(btx_done),
+	.brx_start(brx_start), .brx_len(brx_len), .brx_valid(brx_valid),
+	.brx_data(brx_data), .brx_ready(brx_ready),
+	.guest_mac(enet_mac),
+	.m_req(enet_m_req), .m_we(enet_m_we), .m_addr(enet_m_addr), .m_wdata(enet_m_wdata),
+	.m_rdata(enet_m_rdata), .m_ack(enet_m_ack)
+);
 tc_enet enet (
 	.clk(clk), .reset(dev_rst),
 	.stb(io_stb && io_dev == D_ENET && !io_tmc), .we(io_we),
@@ -558,7 +587,13 @@ tc_enet enet (
 	.er_req(er_req), .er_wdata(er_wdata), .er_n(er_n), .er_ack(er_ack), .er_err(er_err),
 	.er_enable(er_enable), .er_room(er_room), .er_eof(er_eof), .er_full(er_full),
 	.er_nibble(er_nibble),
-	.int_en_tx(int_en_tx), .int_en_rx(int_en_rx)
+	.int_en_tx(int_en_tx), .int_en_rx(int_en_rx),
+	.connected(enet_connected),
+	.btx_req(btx_req), .btx_len(btx_len), .btx_addr(btx_addr), .btx_rd(btx_rd),
+	.btx_q(btx_q), .btx_ack(btx_ack), .btx_done(btx_done),
+	.brx_start(brx_start), .brx_len(brx_len), .brx_valid(brx_valid),
+	.brx_data(brx_data), .brx_ready(brx_ready),
+	.guest_mac(enet_mac)
 );
 tc_scc scc (
 	.clk(clk), .reset(dev_rst),

@@ -79,6 +79,10 @@ localparam CONF_STR = {
 	"O[4:3],Memory,64 MB,128 MB,16 MB,32 MB;",
 	"O[5],Power-on self test,On,Off;",
 	"O[8:6],Boot device,Prompt (NeXT>),SCSI disk,Network,Floppy;",
+	// Ethernet: Main's next_enet daemon reads the mode from status[54:52]
+	// (0 off, 1 eth0 shared + MAC filter, ...); this switch is bit 52 alone,
+	// so Connected = mode 1.  rtl/tc_enet.sv: a twisted-pair link.
+	"O[52],Ethernet,Disconnected,Connected;",
 	"-;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[125:123],Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
@@ -333,6 +337,13 @@ tc_machine machine
 	.fsd_wr(fsd_wr),
 	.fsd_ack(sd_ack_v[4]),
 	.fsd_buff_din(fsd_buff_din),
+	.enet_connected(status[52]),
+	.enet_m_req(enet_m_req),
+	.enet_m_we(enet_m_we),
+	.enet_m_addr(enet_m_addr),
+	.enet_m_wdata(enet_m_wdata),
+	.enet_m_rdata(enet_m_rdata),
+	.enet_m_ack(enet_m_ack),
 
 	.led(led),
 	.reset_req(reset_req),
@@ -353,6 +364,28 @@ wire [7:0] vga_r, vga_g, vga_b;
 wire       vga_hs, vga_vs, vga_de;
 
 assign DDRAM_CLK = clk_ram;
+
+// tc_memsys (tc_vram) and the Ethernet bridge share the DDRAM port:
+// rtl/tc_enet_ddr.sv, the VRAM traffic first.
+wire        va_busy, va_dout_ready, va_rd, va_we;
+wire  [7:0] va_burstcnt, va_be;
+wire [28:0] va_addr;
+wire [63:0] va_dout, va_din;
+wire        enet_m_req, enet_m_we, enet_m_ack;
+wire [28:0] enet_m_addr;
+wire [63:0] enet_m_wdata, enet_m_rdata;
+
+tc_enet_ddr enet_ddr
+(
+	.clk_sys(clk_sys), .clk_ram(clk_ram), .reset_ram(reset),
+	.s_req(enet_m_req), .s_we(enet_m_we), .s_addr(enet_m_addr), .s_wdata(enet_m_wdata),
+	.s_rdata(enet_m_rdata), .s_ack(enet_m_ack),
+	.a_busy(va_busy), .a_burstcnt(va_burstcnt), .a_addr(va_addr), .a_dout(va_dout),
+	.a_dout_ready(va_dout_ready), .a_rd(va_rd), .a_din(va_din), .a_be(va_be), .a_we(va_we),
+	.DDRAM_BUSY(DDRAM_BUSY), .DDRAM_BURSTCNT(DDRAM_BURSTCNT), .DDRAM_ADDR(DDRAM_ADDR),
+	.DDRAM_DOUT(DDRAM_DOUT), .DDRAM_DOUT_READY(DDRAM_DOUT_READY), .DDRAM_RD(DDRAM_RD),
+	.DDRAM_DIN(DDRAM_DIN), .DDRAM_BE(DDRAM_BE), .DDRAM_WE(DDRAM_WE)
+);
 
 tc_memsys memsys
 (
@@ -416,15 +449,15 @@ tc_memsys memsys
 	.SDRAM_CKE(SDRAM_CKE),
 	.SDRAM_CLK(SDRAM_CLK),
 
-	.DDRAM_BUSY(DDRAM_BUSY),
-	.DDRAM_BURSTCNT(DDRAM_BURSTCNT),
-	.DDRAM_ADDR(DDRAM_ADDR),
-	.DDRAM_DOUT(DDRAM_DOUT),
-	.DDRAM_DOUT_READY(DDRAM_DOUT_READY),
-	.DDRAM_RD(DDRAM_RD),
-	.DDRAM_DIN(DDRAM_DIN),
-	.DDRAM_BE(DDRAM_BE),
-	.DDRAM_WE(DDRAM_WE)
+	.DDRAM_BUSY(va_busy),
+	.DDRAM_BURSTCNT(va_burstcnt),
+	.DDRAM_ADDR(va_addr),
+	.DDRAM_DOUT(va_dout),
+	.DDRAM_DOUT_READY(va_dout_ready),
+	.DDRAM_RD(va_rd),
+	.DDRAM_DIN(va_din),
+	.DDRAM_BE(va_be),
+	.DDRAM_WE(va_we)
 );
 
 assign CLK_VIDEO = clk_vid;
