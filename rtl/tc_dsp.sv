@@ -22,7 +22,13 @@
 //               and NeXTSTEP's sound driver resets a DSP that has not taken
 //               one in well under a millisecond.  Main holds the host's
 //               later accesses until the DSP has taken it (next_dsp.cpp
-//               hc_holds), so the DSP sees them in the host's order.
+//               hc_holds), so the DSP sees them in the host's order.  From
+//               the command until Main reports its handler returned
+//               ("host command done", after the handler's last HCR write)
+//               ISR HF2/HF3 read 1/0 ("executing a host message"): the host
+//               never sees the DSP idle (both clear) or aborted (both set) in
+//               between -- the Music Kit monitor relies on HF3 not turning on
+//               inside a host message (smsrc misc.asm).
 //    $8002 ISR  r    bit 0 RXDF, 1 TXDE, 2 TRDY (TXDE and the DSP has read
 //               every word), 3 HF2, 4 HF3 (from the DSP's HCR), 6 DMA
 //               (HM != 0), 7 HREQ = (ICR & ISR) bits 1:0 (dsp_core.c:1048).
@@ -124,6 +130,7 @@ localparam [15:0] FPGA_MAGIC = 16'hD5F1, ARM_MAGIC = 16'hD5A1;
 
 reg  [7:0] icr, cvr, ivr;
 reg  [1:0] hf23;                 // ISR 4:3 = the DSP's HCR HF3/HF2
+reg  [1:0] hc_pend;              // host commands sent whose handler has not returned
 reg [23:0] tx;                   // TXH:TXM:TXL
 reg        tx_full;              // TXL written, the word not yet on the link (a clock or two)
 reg  [2:0] tx_out;               // words with the DSP, "HRX read" not back yet
@@ -143,7 +150,11 @@ wire        txde     = !tx_full && (tx_out < K_TX[2:0]);
 wire        trdy     = txde && (tx_out == 3'd0);
 wire  [1:0] dma_mode = icr[6:5];
 wire        hreq     = (icr[0] && rxdf) || (icr[1] && txde);
-wire  [7:0] isr      = {hreq, dma_mode != 2'd0, 1'b0, hf23, trdy, txde, rxdf};
+// while a host command's handler runs the host sees "executing a host
+// message" (HF2 set, HF3 clear: the monitor's begin_interrupt_handler),
+// then the handler's final flags -- never idle, never "aborted" (both)
+wire  [1:0] hf_view  = (hc_pend != 2'd0) ? 2'b01 : hf23;
+wire  [7:0] isr      = {hreq, dma_mode != 2'd0, 1'b0, hf_view, trdy, txde, rxdf};
 wire [23:0] rx_view  = rxdf ? rxq[rx_rd] : rx_last;
 
 assign int_dsp = (dma_mode == 2'd0 && hreq) || (scr2[23] && txd_act);
@@ -247,7 +258,7 @@ always_ff @(posedge clk) begin : host
 	reg        push;         // a message into mq this clock
 	reg  [3:0] push_t;
 	reg [23:0] push_d;
-	reg        pop_rx, push_rx, tx_sent, tx_ack, txl, init_rx, init_tx, hi_reset;
+	reg        pop_rx, push_rx, tx_sent, tx_ack, hc_sent, hc_done, txl, init_rx, init_tx, hi_reset;
 	reg [23:0] tx_w;
 
 	ack <= stb;
@@ -255,7 +266,7 @@ always_ff @(posedge clk) begin : host
 	if (reset && !reset_d) gen <= gen + 16'd1;
 
 	if (reset) begin
-		icr <= 8'h00; cvr <= 8'h12; ivr <= 8'h0F; hf23 <= 2'd0;
+		icr <= 8'h00; cvr <= 8'h12; ivr <= 8'h0F; hf23 <= 2'd0; hc_pend <= 2'd0;
 		tx <= 24'd0; tx_full <= 1'b0; tx_out <= 3'd0;
 		rx_rd <= 2'd0; rx_wr <= 2'd0; rx_cnt <= 3'd0; rx_last <= 24'd0;
 		dma_ctr <= 3'd0; dma_tx <= 1'b0; txd_act <= 1'b0;
@@ -277,6 +288,7 @@ always_ff @(posedge clk) begin : host
 	else begin
 		push = 1'b0; push_t = 4'd0; push_d = 24'd0;
 		pop_rx = 1'b0; push_rx = 1'b0; tx_sent = 1'b0; tx_ack = 1'b0; txl = 1'b0;
+		hc_sent = 1'b0; hc_done = 1'b0;
 		init_rx = 1'b0; init_tx = 1'b0; hi_reset = 1'b0;
 		tx_w = tx;
 
@@ -342,7 +354,7 @@ always_ff @(posedge clk) begin : host
 			R_RX:      if (d2h_ok_rx && rx_cnt != K[2:0]) push_rx = 1'b1;
 			R_HRXACK:  if (d2h_ok_tx && tx_out != 3'd0) tx_ack = 1'b1;
 			R_FLAGS:   if (d2h_same_reset) hf23 <= d2h_m[4:3];
-			R_HCACK:   ;                 // informational: HC cleared when sent
+			R_HCACK:   if (d2h_same_reset && hc_pend != 2'd0) hc_done = 1'b1;  // handler returned
 			R_TXD:     if (d2h_same_reset) txd_act <= d2h_m[0];
 			R_HIRESET: if (d2h_same_reset) hi_reset = 1'b1;
 			default: ;
@@ -384,6 +396,7 @@ always_ff @(posedge clk) begin : host
 			else if (p_cvr && !cvr_wr) begin
 				push = 1'b1; push_t = T_CVR; push_d = {16'd0, p_cvrv}; p_cvr <= 1'b0;
 				cvr[7] <= 1'b0;          // the command is on its way: taken
+				if (p_cvrv[7] && arm_ok && hc_pend != 2'd3) hc_sent = 1'b1;
 			end
 			else if (p_rxack != 3'd0) begin
 				push = 1'b1; push_t = T_RXACK;
@@ -406,6 +419,7 @@ always_ff @(posedge clk) begin : host
 		// never came back after a long load)
 		if (tx_sent) tx_full <= 1'b0;
 		tx_out <= tx_out + {2'd0, tx_sent} - {2'd0, tx_ack};
+		hc_pend <= hc_pend + {1'b0, hc_sent} - {1'b0, hc_done};
 
 		//------------------------------------------------------------
 		// INIT (after the messages: the T_ICR carries the new epoch)
@@ -424,7 +438,7 @@ always_ff @(posedge clk) begin : host
 		//------------------------------------------------------------
 		if (hi_reset) begin
 			icr <= 8'h00; cvr <= 8'h12; ivr <= 8'h0F;
-			tx_full <= 1'b0; dma_ctr <= 3'd0;
+			tx_full <= 1'b0; dma_ctr <= 3'd0; hc_pend <= 2'd0;
 		end
 
 		//------------------------------------------------------------
@@ -532,7 +546,7 @@ always_ff @(posedge clk) begin : host
 			p_start <= 1'b1; p_mode <= dsp_mode;
 		end
 		if (!dsp_run && dsp_run_d) begin
-			icr <= 8'h00; cvr <= 8'h12; ivr <= 8'h0F; hf23 <= 2'd0;
+			icr <= 8'h00; cvr <= 8'h12; ivr <= 8'h0F; hf23 <= 2'd0; hc_pend <= 2'd0;
 			tx_full <= 1'b0; tx_out <= 3'd0;
 			rx_rd <= 2'd0; rx_wr <= 2'd0; rx_cnt <= 3'd0; rx_last <= 24'd0;
 			dma_ctr <= 3'd0; txd_act <= 1'b0; dd_req <= 1'b0;
