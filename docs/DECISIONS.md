@@ -54,6 +54,12 @@ as "HS §n") and in the Previous r1851 sources under `scratch/resources/`.
   on 1080p, 969x720 on 720p; V-Integer; HV-Integer). No
   `MISTER_DOWNSCALE_NN`: 832 lines onto 720p is a downscale and text needs the
   filtered scaler.
+- **No Y/C output** (`MISTER_DISABLE_YC`, 2026-09-27, user decision): the
+  picture's line rate is 61.3 kHz (100 MHz / 1632), which no composite or
+  S-Video input can show, so the encoder only cost logic and multipliers at
+  ~95% ALMs.  `MISTER_DISABLE_ADAPTIVE` and `MISTER_DISABLE_ALSA` have been
+  set since the first build (the MacQuadra800 release recipe).  The switches
+  and their reasons are in the Readme (Building).
 
 ## CPU
 

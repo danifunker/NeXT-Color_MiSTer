@@ -93,6 +93,10 @@ set_global_assignment -name SEED 1
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
+# No Y/C (composite / S-Video) encoder: the NeXT picture is 1120x832 at
+# 68.4 Hz with a 61.3 kHz line rate (100 MHz / 1632), which no composite or
+# S-Video input can show; the encoder's logic and multipliers go (2026-09-27).
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_YC=1"
 set_global_assignment -name VERILOG_MACRO "AP040_EXPERIMENTAL_XSTORE=1"
 set_global_assignment -name VERILOG_MACRO "AP040_EXPERIMENTAL_LEA=1"
 

@@ -1,12 +1,67 @@
 # NeXT-Color core for MiSTer
 
 ## General description
-A NeXTstation Turbo Color (33 MHz 68040, Turbo chipset, 12-bit color, 1120x832) core for MiSTer. Work in progress.
 
-* Boot ROM: Rev 3.3 v74, `releases/boot.rom` -> `games/NeXT-Color/boot.rom` on the MiSTer.
-* Build: `bash scripts/build_only.sh` (Git bash; `--check` = Analysis & Synthesis only). Machine settings in `scripts/local.env` (from `local.env.sample`).
-* Design decisions: `docs/DECISIONS.md`. Hand-off state: the newest `RESUME-*.md`.
-* ROM analysis (the RTL spec): `rom-dissassembly/hardware-summary.md`. Hardware references: `RESOURCES.md`.
+A NeXTstation Turbo Color core for MiSTer: a 33 MHz 68040, the Turbo chipset,
+12-bit colour at 1120x832, NeXT ROM Rev 3.3 v74. It boots NeXTSTEP 3.3 to the
+colour desktop. Work in progress.
+
+| Part | State |
+|---|---|
+| CPU | 68040 at 33 MHz (the AP68040 core of the MacQuadra800 core), FPU, MMU. NWBench Dhrystone 15.1 MIPS |
+| Memory | 16, 32, 64 (default) or 128 MB in SDRAM |
+| Video | 1120x832 at 68.4 Hz, 12-bit colour (Bt463 palette, TMC timing) |
+| Keyboard and mouse | PS/2 keyboard and mouse as the NeXT keyboard (KMS) |
+| SCSI | Two hard disks and a CD-ROM drive (images on the SD card) |
+| Floppy | 2.88 MB drive (720K, 1.44M and 2.88M images) |
+| Ethernet | On the MiSTer's LAN (optional) |
+| Sound out | 16-bit stereo, 44.1 and 22.05 kHz |
+| DSP56001 | Emulated on the MiSTer's ARM, about 1/8 of real speed |
+| Sound in, DSP serial port, printer, ADB | Not present |
+
+* Design decisions: `docs/DECISIONS.md`. Hand-off state: the newest
+  `RESUME-*.md`. ROM analysis (the RTL spec):
+  `rom-dissassembly/hardware-summary.md`. Hardware references: `RESOURCES.md`.
+  Release builds and their notes: `releases/`.
+
+## Installing
+
+1. **Core**: the rbf in `_Unstable/` (or `_Computer/`) as `NeXT-Color.rbf`.
+   Load it directly, not through an `.mgl` file (an MGL load once corrupted the
+   remembered disk mount, `config/NeXT-Color.s0`).
+2. **Boot ROM**: `releases/boot0.rom` (NeXT ROM Rev 3.3 v74) in
+   `games/NeXT-Color/`. Main loads `boot0.rom`, or `boot.rom` if there is no
+   `boot0.rom`, each time the core starts; the OSD's "Load boot ROM" loads
+   another one.
+3. **Main**: this core needs the `next-color` build of Main_MiSTer
+   (`/media/fat/MiSTer`; keep the old one, `sync`, reboot). It serves the SCSI
+   target responses, the CD-ROM images, the Ethernet bridge, the battery clock
+   and the DSP. A stock Main boots to `NeXT>` but finds no disk. The DSP needs
+   a build from 2026-09-27 or later (`scripts/build_main_wsl.sh`);
+   `releases/MiSTer` predates it.
+4. **Disk**: a NeXTSTEP disk image in the OSD's "SCSI disk 0" slot, and
+   "Boot device" set to "SCSI disk". Images are written to: work on a copy.
+5. **Display**: give the core its own 1080p section in `MiSTer.ini` (next
+   section).
+
+Shut NeXTSTEP down before loading another core or rebooting the MiSTer
+(Log Out -> Power Off, or `halt` as root) and wait until the SD card is quiet:
+the disk image is open for writing.
+
+## OSD menu
+
+| Entry | What it does |
+|---|---|
+| SCSI disk 0 / SCSI disk 1 | Hard disk images (`.hda`, `.vhd`, `.img`) for SCSI targets 0 and 1; remembered and mounted again when the core starts |
+| CD-ROM | A disc image (`.iso`, `.cue`/`.bin`, `.chd`) in the CD-ROM drive, SCSI target 3; not remembered |
+| Floppy | A floppy image (`.img`, `.ima`, `.flp`, `.vfd`, `.fd`) in the floppy drive |
+| Memory | 64 MB (default), 128 MB, 16 MB or 32 MB |
+| Power-on self test | On: the ROM tests the machine at power-on; Off: faster start |
+| Boot device | Prompt (stay at `NeXT>`), SCSI disk, Network or Floppy; written to the NVRAM boot command |
+| Ethernet | Disconnected (no cable) or Connected (on the MiSTer's LAN) |
+| Aspect ratio, Scale | How the scaler fits the picture (see Display) |
+| Load boot ROM | Load a different ROM file |
+| Reset | Reset the machine; the disk mounts stay. The NVRAM is not kept: at power-on and reset it gets a default image with the OSD's boot device |
 
 ## Display: use 1080p
 
@@ -55,32 +110,112 @@ To undo the change, delete the `[NeXT-Color]` section. Other `video_mode` values
 are listed in the MiSTer.ini that ships with MiSTer (for example `9` is
 1920x1080@50).
 
+The picture goes out over HDMI through the MiSTer scaler. The native signal
+has a 61.3 kHz line rate; the analog output has not been tried, and there is
+no composite or S-Video output (see Building).
+
 ## Disks
 
-* OSD **SCSI disk 0 / 1** (`.hda`, `.vhd`, `.img`): SCSI targets 0 and 1. The
-  mount is remembered (`config/NeXT-Color.s0`/`.s1`) and restored at core start.
-  **CD-ROM** (`.iso`, `.cue`/`.bin`, `.chd`) is target 3.
-* Set OSD **Boot device** to "SCSI disk" to boot NeXTSTEP from target 0 (the
-  NVRAM boot command becomes `sd`), or type `b sd` at `NeXT>`.
-* The target responses (INQUIRY, READ CAPACITY, ...) come from the MiSTer's
-  Main program: it must be the `next-color` build of Main_MiSTer (its
-  `is_next()` accepts this core; `scripts/build_main_wsl.sh`). A stock Main
-  finds no disk.
-* Disk images are written to: work on a copy.
+* **Hard disks**: SCSI targets 0 and 1. Set **Boot device** to "SCSI disk" to
+  boot NeXTSTEP from target 0 (the NVRAM boot command becomes `sd`), or type
+  `b sd` at `NeXT>`.
+* **CD-ROM**: target 3. The drive is always on the SCSI bus, empty or not, so
+  NeXTSTEP finds it at boot ("PreviousCD-ROM ... as sd1 at sc0 target 3") and
+  a disc mounted in the OSD while NeXTSTEP runs appears in the Workspace
+  (tested with NeXT software CDs; NeXT UFS discs mount as `/<volume name>`).
+  The mount is not remembered.
+* **Floppy**: the 82077 and a 2.88 MB drive. NeXTSTEP attaches it as `fd0`;
+  the Workspace's Initialize formats an image at 2.88 MB, and files written
+  there land in the image on the SD card. NeXTSTEP 3.3 does not read a DOS
+  file system on a 2.88 MB disk (its sectors read correctly).
+* The target responses (INQUIRY, READ CAPACITY, ...) come from Main (see
+  Installing).
+
+## Network
+
+Set the OSD **Ethernet** to "Connected": the Turbo's 7213 Ethernet is bridged
+to the MiSTer's wired eth0 (shared with Linux; the guest's own MAC,
+00:00:0F:12:34:56, is filtered). NeXTSTEP 3.3 has no DHCP client: its
+`-AUTOMATIC-` setting is BOOTP, which most routers do not answer, so give it a
+static address, for example as root:
+
+```
+ifconfig en0 192.168.1.38 netmask 255.255.255.0 up
+```
+
+or permanently with HostManager, or `INETADDR`, `IPNETMASK` and `ROUTER` in
+`/etc/hostconfig`. "Disconnected" is a machine without a cable.
+
+## Keyboard and mouse
+
+A PS/2 (or USB, through the MiSTer) keyboard and mouse act as the NeXT keyboard
+and mouse. The Command keys are the Windows keys; the volume keys work. At the
+login window move the mouse once before typing, the first keys after boot can
+be lost.
 
 ## Sound and DSP
 
 * **Sound out** plays through the MiSTer's HDMI / analog audio (16-bit
   stereo, 44.1 kHz; 22.05 kHz sounds are doubled as on the real machine;
-  the keyboard's volume keys work).  There is no sound input (no microphone
+  the keyboard's volume keys work). There is no sound input (no microphone
   CODEC) and no DSP port (the DSP's serial ports have no connector here).
 * **The DSP56001 runs on the MiSTer's ARM**, in the DSP interpreter of the
   Previous emulator, inside Main: the FPGA answers the 68040's side of the
-  DSP host port and passes the traffic to the ARM through DDR3.  It needs
-  the `next-color` build of Main_MiSTer (see Disks).  It runs at roughly
-  1.5 million DSP instructions per second, about an eighth of a real
-  25 MHz 56001: programs that use the DSP work, but heavy real-time work
-  (Music Kit synthesis) runs slower than on the real machine.
+  DSP host port and passes the traffic to the ARM through DDR3. It runs at
+  roughly 1.5 million DSP instructions per second, about an eighth of a real
+  25 MHz 56001.
+  * Works: the Sound Kit's DSP programs (mono and mu-law sounds play in real
+    time through the DSP), and Music Kit renders to a sound file
+    (`playscore -w file score`: the Music Kit example `Examp1` renders
+    correctly).
+  * Slower than real time: Music Kit synthesis. Live `playscore` cannot keep
+    up with the music; long renders and live playback are still being made
+    reliable (see the newest `RESUME-*.md`).
+  * The Music Kit's scores and example programs are not part of the
+    NeXTSTEP 3.3 User disks; `playscore` looks for scores in
+    `/LocalLibrary/Music/Scores`.
+
+## Known limitations
+
+* The DSP is slow (above); a DSP in the FPGA may come later.
+* No sound input, no DSP serial port, no printer (its registers only), no
+  ADB devices, no second display. The NVRAM is not saved.
+* The FPGA is nearly full (about 95% of its logic), so fitter results vary a
+  lot between builds: a build is released only when it meets timing, and a
+  build that misses timing is only tried with NeXTSTEP shut down.
+
+## Building
+
+* `bash scripts/build_only.sh` (Git bash; `--check` = Analysis & Synthesis
+  only). Machine settings in `scripts/local.env` (from `local.env.sample`).
+  Quartus 17.0.x. A full build takes about 22 minutes; the result is released
+  only if it meets timing (the script says so), otherwise the fitter seed in
+  `NeXT-Color.qsf` is changed and the build repeated.
+* Main: `bash scripts/build_main_wsl.sh` in WSL (branch `next-color` of
+  `../Main_MiSTer`).
+* Simulation and unit benches: `verilator/README.md` (`bash scripts/sim_wsl.sh`).
+
+### Build switches in `NeXT-Color.qsf`
+
+The MiSTer framework (`sys/`) and the CPU core have compile-time switches.
+This core sets these:
+
+| Switch | Set | What it does |
+|---|---|---|
+| `MISTER_DISABLE_ADAPTIVE` | yes (since the first build, from the MacQuadra800 recipe) | Removes the scaler's adaptive scanline filtering, a CRT-style effect of no use on a desktop; saves logic in the HDMI scaler, where timing is tightest |
+| `MISTER_DISABLE_ALSA` | yes (since the first build, from the MacQuadra800 recipe) | Removes the path that mixes Linux-side (ALSA) audio into the core's audio output; the NeXT's own sound is not affected |
+| `MISTER_DISABLE_YC` | yes (2026-09-27) | Removes the composite / S-Video (Y/C) encoder of the analog output. The NeXT picture has a 61.3 kHz line rate (1120x832 at 68.4 Hz), which no composite or S-Video input can show, so the encoder never had a use here; its logic and multipliers are freed |
+| `AP040_EXPERIMENTAL_XSTORE`, `AP040_EXPERIMENTAL_LEA` | yes | 68040 core options, as in the validated MacQuadra800 build: stores that cross a data-cache line, and a faster LEA/PEA address path |
+
+And leaves these off:
+
+| Switch | Why not |
+|---|---|
+| `MISTER_DOWNSCALE_NN` | Nearest-neighbour instead of filtered downscaling. Saves scaler logic but makes text unreadable on a 720p output (832 lines onto 720); no effect at 1080p |
+| `MISTER_SMALL_VBUF` | A 1 MB scaler buffer per frame: too small for 1120x832 |
+| `MISTER_FB`, `MISTER_FB_PALETTE` | A Linux framebuffer on top of the core: not used |
+| `MISTER_DEBUG_NOHDMI` | Removes HDMI: debug only |
+| `MISTER_DUAL_SDRAM` | Pin layout for dual-SDRAM I/O boards |
 
 The notes below come from the MiSTer template and describe the standard core layout. `<core_name>` is `NeXT-Color`.
 
@@ -110,7 +245,7 @@ Framework implies use of at least one PLL in the core. Framework doesn't contain
 
 ### Verilog Macros
 
-The following macros can be defined and will affect the framework features:
+The framework switches this core sets, and why, are listed under Building. The full list:
 
 Macro                    |   Effect
 -------------------------|---------------------------------
@@ -120,9 +255,10 @@ MISTER_FB                | Allows to use framebuffer from the core
 MISTER_SMALL_VBUF        | Sets a smaller video buffer for the ASCAL
 MISTER_DOWNSCALE_NN      | Ascal's downscale mode
 MISTER_DISABLE_ADAPTIVE  | Disables adaptive scan lines
+MISTER_DISABLE_YC        | Disables the Y/C (composite / S-Video) output
+MISTER_DISABLE_ALSA      | Disables mixing Linux (ALSA) audio into the core's audio output
 MISTER_FB_PALETTE        | Framebuffer palette
 
 
 # Quartus version
 Cores must be developed in **Quartus v17.0.x**. It's recommended to have updates, so it will be **v17.0.2**. Newer versions won't give any benefits to FPGA used in MiSTer, however they will introduce incompatibilities in project settings and it will make harder to maintain the core and collaborate with others. **So please stick to good old 17.0.x version.** You may use either Lite or Standard license.
-
