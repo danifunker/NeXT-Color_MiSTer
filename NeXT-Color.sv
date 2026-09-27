@@ -150,14 +150,16 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(0), .VDNUM(5)) hps_io
 	.img_mounted(img_mounted_v),
 	.img_readonly(img_readonly),
 	.img_size(img_size),
-	.sd_lba('{fsd_lba, sd_lba, sd_lba, sd_lba, sd_lba}),
+	// sd_lba / sd_blk_cnt / sd_buff_din are unpacked [VDNUM] = [0:VDNUM-1]:
+	// the FIRST pattern element is slot 0 (sd_rd/sd_wr are packed, MSB first)
+	.sd_lba('{sd_lba, sd_lba, sd_lba, sd_lba, fsd_lba}),
 	.sd_rd({fsd_rd, {4{sd_rd}} & scsi_onehot}),
 	.sd_wr({fsd_wr, {4{sd_wr}} & scsi_onehot}),
 	.sd_ack(sd_ack_v),
 	.sd_blk_cnt('{6'd0, 6'd0, 6'd0, 6'd0, 6'd0}),
 	.sd_buff_addr(sd_buff_addr),
 	.sd_buff_dout(sd_buff_dout),
-	.sd_buff_din('{fsd_buff_din, sd_buff_din, sd_buff_din, sd_buff_din, sd_buff_din}),
+	.sd_buff_din('{sd_buff_din, sd_buff_din, sd_buff_din, sd_buff_din, fsd_buff_din}),
 	.sd_buff_wr(sd_buff_wr)
 );
 
