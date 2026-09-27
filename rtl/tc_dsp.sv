@@ -55,7 +55,8 @@
 //  request through the PC chip's DSP channel (tc_tdma dd_*): the byte
 //  counter starts at 4 - HM (24-bit: H M L; 16-bit: M L; 8-bit: L) or 4
 //  when unpacked (pad, H, M, L), and each byte goes to / comes from
-//  register TRXL - counter.  The direction is TREQ at the last ICR write.
+//  register TRXL - counter.  The direction is to the DSP only when the last
+//  ICR write in DMA mode had TREQ without RREQ (dsp.c:154).
 //
 //  The link (Main_MiSTer support/next/next_dsp.cpp has the protocol): DDR3
 //  byte $30400000 (above the 2 MB of VRAM at $30000000); the FPGA word
@@ -139,7 +140,7 @@ reg  [1:0] rx_rd, rx_wr;
 reg  [2:0] rx_cnt;
 reg [23:0] rx_last;              // RX after the last word was taken
 reg  [2:0] dma_ctr;              // DSP_HandleDMA's dma_address_counter
-reg        dma_tx;               // DMA direction: TREQ at the last ICR write
+reg        dma_tx;               // DMA direction: to the DSP (TREQ alone at the last ICR write)
 reg        txd_act;              // the DSP's TXD pin is low
 reg  [3:0] rgen;                 // epoch: DSP resets
 reg  [1:0] itx, irx;             //        TX-side / RX-side INITs
@@ -240,7 +241,12 @@ wire [23:0] tx_new = {be[2] ? wdata[23:16] : tx[23:16],
 wire [2:0] ctr_start = unpacked ? 3'd4 : (3'd4 - {1'b0, dma_mode});
 wire [2:0] ctr_use   = ((dma_ctr == 3'd0) ? ctr_start : dma_ctr) - 3'd1;   // byte TRXL - ctr_use
 reg  [2:0] dd_ctr;               // ctr_use of the byte in flight
-wire       dma_go    = (dma_mode != 2'd0) && hreq && dd_avail && !dd_req;
+// A request moves a byte in the channel's direction only: to the DSP on
+// TXDE, from it on RXDF.  With both TREQ and RREQ set (NeXTSTEP's sound
+// driver writes ICR $53 while it sends a host message during a DSP->host
+// DMA) Previous reads (dsp.c:154) but also on TXDE, i.e. stale RX words.
+wire       dma_rq    = dma_tx ? (icr[1] && txde) : (icr[0] && rxdf);
+wire       dma_go    = (dma_mode != 2'd0) && dma_rq && dd_avail && !dd_req;
 function automatic [7:0] rx_byte;
 	input [23:0] w;
 	input  [2:0] c;
@@ -303,7 +309,9 @@ always_ff @(posedge clk) begin : host
 		//------------------------------------------------------------
 		if (icr_wr) begin
 			icr <= {1'b0, icr_new[6:0]};
-			if (icr_new[6:5] != 2'd0) dma_tx <= icr_new[1];
+			// DMA direction: to the DSP only with TREQ alone (Previous
+			// dsp_core.c:1175 dma_direction, dsp.c:154)
+			if (icr_new[6:5] != 2'd0) dma_tx <= icr_new[1] && !icr_new[0];
 			if (icr_new[7]) begin                     // INIT
 				dma_ctr <= 3'd0;
 				if (icr_new[0]) init_rx = 1'b1;

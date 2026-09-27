@@ -368,6 +368,24 @@ initial begin : test
 	wr(ICR, 8'h08);
 	dd_en = 1'b0;
 
+	// the same with TREQ set too (NeXTSTEP writes ICR $53 while it sends a
+	// host message during a DSP->host DMA): still from the DSP (Previous
+	// dsp.c:154), and only when a word is there -- it pumped memory into
+	// the DSP and flooded the Music Kit's host message stack
+	for (k = 0; k < 64; k++) dmem[k] = 8'hEE;
+	dptr = 0; dlimit = 12; dd_en = 1'b1;       // room for stray bytes
+	wr(ICR, 8'hCB);                            // INIT, HM 10, HF0, TREQ, RREQ
+	for (k = 0; k < 4; k++) send_word({8'h00, 8'(k + 8'h10), 8'(k + 8'h90)});
+	for (k = 0; k < 20000 && dptr < 8; k++) @(negedge clk);
+	ok = 1'b1;
+	for (k = 0; k < 4; k++) ok = ok && dmem[2 * k] == 8'(k + 8'h10) && dmem[2 * k + 1] == 8'(k + 8'h90);
+	check(dptr == 8 && ok, $sformatf("DMA with TREQ and RREQ goes from the DSP: %0d bytes, %02x %02x %02x %02x",
+	      dptr, dmem[0], dmem[1], dmem[2], dmem[3]));
+	repeat (2000) @(negedge clk);
+	check(dptr == 8, $sformatf("no stale RX bytes while TX is empty (%0d bytes)", dptr));
+	wr(ICR, 8'h08);
+	dd_en = 1'b0;
+
 	for (k = 0; k < 64; k++) dmem[k] = 8'hEE;
 	dptr = 0; dlimit = 8; dd_en = 1'b1;
 	scr2[29] = 1'b1;                           // unpacked
