@@ -191,9 +191,26 @@ localparam logic [23:0] PROG [0:11] = '{
 // The host command program: HCIE on, host interrupts at IPL 2 and
 // unmasked, HF2 = running, then a busy loop.  P:$24 (host command $12, the
 // Music Kit's HOST_R_DONE) is a long interrupt to P:$30, shaped like the
-// monitor's handlers: HCR written with HF2 and HF3 clear, some work, then
-// HF3 set ("timed message queue full") in one HCR write, RTI.
-function automatic logic [23:0] prog_hc(input int a);
+// monitor's handlers: HCR written with HF2 and HF3 clear, the ack written
+// to HTX (over the word a DMA read left there, smsrc hmlib.asm
+// hm_host_r_done), some work, then HF3 set ("timed message queue full")
+// and HTIE on in one HCR write, RTI.  The host transmit interrupt (P:$22 ->
+// P:$58) then sends the next DSP message once: $050001 (DM_HOST_R_REQ,
+// channel 1, the next DMA read).  With "left" the program first leaves two
+// words the host does not read, as a DMA read buffer ends: $0000aa in the
+// host's RX and $0000bb in HTX.
+function automatic logic [23:0] prog_hc(input int a, input bit left);
+	if (left) case (a)
+	5:  return 24'h08f4ab;          // movep #$0000aa,x:$ffeb
+	6:  return 24'h0000aa;
+	7:  return 24'h0aa981;          // jclr #1,x:$ffe9,$7       HTDE
+	8:  return 24'h000007;
+	9:  return 24'h08f4ab;          // movep #$0000bb,x:$ffeb
+	10: return 24'h0000bb;
+	11: return 24'h000000;          // nop       the busy loop
+	12: return 24'h0c000b;          // jmp $b
+	default: ;
+	endcase
 	case (a)
 	0:  prog_hc = 24'h0aa822;       // bset #2,x:$ffe8          HCIE
 	1:  prog_hc = 24'h08f4bf;       // movep #$000c00,x:$ffff   IPR: host IPL 2
@@ -203,28 +220,34 @@ function automatic logic [23:0] prog_hc(input int a);
 	5:  prog_hc = 24'h000000;       // nop       a busy loop, not a spin on
 	6:  prog_hc = 24'h0c0005;       // jmp $5    one instruction (the Music Kit's
 	                                //           DSP is computing, not waiting)
+	34: prog_hc = 24'h0bf080;       // P:$22 jsr >$58           host transmit
+	35: prog_hc = 24'h000058;
 	36: prog_hc = 24'h0bf080;       // P:$24 jsr >$30
 	37: prog_hc = 24'h000030;
 	48: prog_hc = 24'h08f4a8;       // P:$30 movep #$04,x:$ffe8  HF2, HF3 clear
 	49: prog_hc = 24'h000004;
 	50: prog_hc = 24'h08f4ab;       // P:$32 movep #$0a0b0c,x:$ffeb  an ack to the
 	51: prog_hc = 24'h0a0b0c;       //       host (the monitor's HOST_R_DONE ack)
-	82: prog_hc = 24'h08f4a8;       // P:$52 movep #$14,x:$ffe8  HF3 set
-	83: prog_hc = 24'h000014;
+	82: prog_hc = 24'h08f4a8;       // P:$52 movep #$16,x:$ffe8  HF3 set, HTIE on
+	83: prog_hc = 24'h000016;
 	84: prog_hc = 24'h000004;       // P:$54 rti
+	88: prog_hc = 24'h08f4ab;       // P:$58 movep #$050001,x:$ffeb  the next message
+	89: prog_hc = 24'h050001;
+	90: prog_hc = 24'h0aa801;       // P:$5a bclr #1,x:$ffe8   HTIE off: once
+	91: prog_hc = 24'h000004;       // P:$5b rti
 	default: prog_hc = 24'h000000;  // nop
 	endcase
 endfunction
 
 // SCR2: DSP_RESET (31), BLK_END (30), UNPKD (29), MODE_B/A (28/27), MEM_EN (5)
-task automatic dsp_boot(input bit hc);
+task automatic dsp_boot(input bit hc, input bit left = 1'b0);
 	scr2[31] = 1'b0;                           // reset
 	repeat (50) @(negedge clk);
 	scr2[5] = 1'b1;                            // DSP memory on
 	scr2[28] = 1'b1; scr2[27] = 1'b0;          // mode 1: bootstrap from the host
 	repeat (5) @(negedge clk);
 	scr2[31] = 1'b1;                           // start
-	if (hc) for (int i = 0; i < 85; i++) send_word(prog_hc(i));
+	if (hc) for (int i = 0; i < 92; i++) send_word(prog_hc(i, left));
 	else    for (int i = 0; i < 12; i++) send_word(PROG[i]);
 	wr(ICR, 8'h08);                            // HF0: the bootstrap ends, the program runs
 endtask
@@ -423,39 +446,50 @@ initial begin : test
 	end
 
 	// host commands, the kernel's pattern at the end of every DMA read
-	// buffer: CVR $92 (HOST_R_DONE) and CVR $12 right after.  The host sees
+	// buffer (mach_kernel: HOST_R_DONE, wait for HC clear, INIT the receive
+	// side; the INIT's read-modify-write puts CVR $12 back).  The host sees
 	// HC clear at once (NeXTSTEP resets a DSP that has not taken a command
-	// within a millisecond), and the write after it must not cancel the
-	// command before the DSP has taken it (Main holds the ring).
-	$display("host command");
-	dsp_boot(1'b1);
-	wait_isr(3, 1'b1, 5000, "HF2 from the host command program", ok);
-	rd(ISR, v); check(!v[4], $sformatf("HF3 clear before the command (ISR %02x)", v));
-	wr(CVR, 8'h92);
-	wr(ICR, 8'h89);                            // INIT RX, RREQ, HF0: NeXTSTEP's next access
-	repeat (8) @(negedge clk);
-	rd(CVR, v); check(v == 8'h12, $sformatf("CVR %02x a few clocks after the command: HC clear", v));
-	wr(CVR, 8'h12);
-	// until the handler has returned the host must not see the DSP idle
-	// (HF2 and HF3 clear): a host message started there is what HF3 then
-	// blocks, and NeXTSTEP resets the DSP
-	ok = 1'b0;
-	for (k = 0; k < 5000 && !ok; k++) begin
-		rd(ISR, v);
-		if (v[4]) ok = 1'b1;
-		else if (!v[3]) begin
-			check(1'b0, $sformatf("ISR %02x: the host saw the DSP idle inside the command", v));
-			break;
+	// within a millisecond), and the writes after it must not cancel the
+	// command before the DSP has taken it (Main holds the ring).  A 56001
+	// is through the handler before the INIT: the ack it wrote to HTX goes
+	// with the INIT, and the first word the host reads after it is the
+	// DSP's next message -- the driver takes it for the next DMA request,
+	// any other word can stall playscore -w (Main next_dsp.cpp hc_holding).
+	for (int left = 0; left < 2; left++) begin
+		$display("host command%s", (left != 0) ? ", two words left by a DMA read" : "");
+		dsp_boot(1'b1, left[0]);
+		wait_isr(3, 1'b1, 5000, "HF2 from the host command program", ok);
+		if (left != 0) begin
+			wait_isr(0, 1'b1, 5000, "RXDF: the first word left", ok);
+			repeat (20 * arm_every) @(negedge clk);    // the second one in HTX
 		end
-		repeat (3) @(negedge clk);
+		rd(ISR, v); check(!v[4], $sformatf("HF3 clear before the command (ISR %02x)", v));
+		wr(CVR, 8'h92);
+		wr(ICR, 8'h89);                        // INIT RX, RREQ, HF0: NeXTSTEP's next access
+		repeat (8) @(negedge clk);
+		rd(CVR, v); check(v == 8'h12, $sformatf("CVR %02x a few clocks after the command: HC clear", v));
+		wr(CVR, 8'h12);
+		// until the handler has returned the host must not see the DSP idle
+		// (HF2 and HF3 clear): a host message started there is what HF3 then
+		// blocks, and NeXTSTEP resets the DSP
+		ok = 1'b0;
+		for (k = 0; k < 5000 && !ok; k++) begin
+			rd(ISR, v);
+			if (v[4]) ok = 1'b1;
+			else if (!v[3]) begin
+				check(1'b0, $sformatf("ISR %02x: the host saw the DSP idle inside the command", v));
+				break;
+			end
+			repeat (3) @(negedge clk);
+		end
+		check(ok, "HF3: the $12 handler ran, the CVR write after it did not cancel it");
+		rd(ISR, v); check(!v[3] && v[4], $sformatf("after the handler: HF2 clear, HF3 set (ISR %02x)", v));
+		recv_word(w); check(w == 24'h050001,
+			$sformatf("the first word after the INIT is the DSP's next message: %06x", w));
+		repeat (40 * arm_every) @(negedge clk);
+		rd(ISR, v); check(!v[0], $sformatf("nothing more for the host (ISR %02x)", v));
+		wr(ICR, 8'h08);
 	end
-	check(ok, "HF3: the $12 handler ran, the CVR write after it did not cancel it");
-	rd(ISR, v); check(!v[3] && v[4], $sformatf("after the handler: HF2 clear, HF3 set (ISR %02x)", v));
-	// the handler wrote its ack after the host's INIT (on a 56001 the host's
-	// accesses right after a command land while the handler starts): it
-	// must not be thrown away with the words from before the INIT
-	recv_word(w); check(w == 24'h0a0b0c, $sformatf("the handler's ack after the INIT: %06x", w));
-	wr(ICR, 8'h08);
 
 	$display("DSP instructions run: %0d in %0d ARM passes, mailbox words: %0d, simulated %0t",
 	         dsp_instr, arm_calls, mb_ops, $time);
