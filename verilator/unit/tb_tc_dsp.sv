@@ -198,7 +198,12 @@ localparam logic [23:0] PROG [0:11] = '{
 // P:$58) then sends the next DSP message once: $050001 (DM_HOST_R_REQ,
 // channel 1, the next DMA read).  With "left" the program first leaves two
 // words the host does not read, as a DMA read buffer ends: $0000aa in the
-// host's RX and $0000bb in HTX.
+// host's RX and $0000bb in HTX.  The busy loop keeps HRIE on: the host
+// receive interrupt (P:$20 -> P:$60) reads each host word and counts it in
+// R7; host command $13 (P:$26 -> P:$68) sends R7 to the host, like the
+// monitor's XHM taking its words from the HMS; host command $14 (P:$28 ->
+// P:$70) spins until HF1 with host interrupts masked, like the monitor's
+// host_xmt handler after a DMA read request.
 function automatic logic [23:0] prog_hc(input int a, input bit left);
 	if (left) case (a)
 	5:  return 24'h08f4ab;          // movep #$0000aa,x:$ffeb
@@ -207,7 +212,7 @@ function automatic logic [23:0] prog_hc(input int a, input bit left);
 	8:  return 24'h000007;
 	9:  return 24'h08f4ab;          // movep #$0000bb,x:$ffeb
 	10: return 24'h0000bb;
-	11: return 24'h000000;          // nop       the busy loop
+	11: return 24'h0aa820;          // bset #0,x:$ffe8  HRIE, the busy loop
 	12: return 24'h0c000b;          // jmp $b
 	default: ;
 	endcase
@@ -217,13 +222,19 @@ function automatic logic [23:0] prog_hc(input int a, input bit left);
 	2:  prog_hc = 24'h000c00;
 	3:  prog_hc = 24'h00fcb8;       // andi #$fc,mr
 	4:  prog_hc = 24'h0aa823;       // bset #3,x:$ffe8          HF2
-	5:  prog_hc = 24'h000000;       // nop       a busy loop, not a spin on
+	5:  prog_hc = 24'h0aa820;       // bset #0,x:$ffe8  HRIE: a busy loop, not a spin on
 	6:  prog_hc = 24'h0c0005;       // jmp $5    one instruction (the Music Kit's
 	                                //           DSP is computing, not waiting)
+	32: prog_hc = 24'h0bf080;       // P:$20 jsr >$60           host receive
+	33: prog_hc = 24'h000060;
 	34: prog_hc = 24'h0bf080;       // P:$22 jsr >$58           host transmit
 	35: prog_hc = 24'h000058;
 	36: prog_hc = 24'h0bf080;       // P:$24 jsr >$30
 	37: prog_hc = 24'h000030;
+	38: prog_hc = 24'h0bf080;       // P:$26 jsr >$68           host command $13
+	39: prog_hc = 24'h000068;
+	40: prog_hc = 24'h0bf080;       // P:$28 jsr >$70           host command $14
+	41: prog_hc = 24'h000070;
 	48: prog_hc = 24'h08f4a8;       // P:$30 movep #$04,x:$ffe8  HF2, HF3 clear
 	49: prog_hc = 24'h000004;
 	50: prog_hc = 24'h08f4ab;       // P:$32 movep #$0a0b0c,x:$ffeb  an ack to the
@@ -235,6 +246,16 @@ function automatic logic [23:0] prog_hc(input int a, input bit left);
 	89: prog_hc = 24'h050001;
 	90: prog_hc = 24'h0aa801;       // P:$5a bclr #1,x:$ffe8   HTIE off: once
 	91: prog_hc = 24'h000004;       // P:$5b rti
+	96: prog_hc = 24'h56f000;       // P:$60 move x:$ffeb,a     read HRX
+	97: prog_hc = 24'h00ffeb;
+	98: prog_hc = 24'h205f00;       // P:$62 move (r7)+         count it
+	99: prog_hc = 24'h000004;       // P:$63 rti
+	104: prog_hc = 24'h677000;      // P:$68 move r7,x:$ffeb    the count to the host
+	105: prog_hc = 24'h00ffeb;
+	106: prog_hc = 24'h000004;      // P:$6a rti
+	112: prog_hc = 24'h0aa984;      // P:$70 jclr #4,x:$ffe9,$70  wait for HF1
+	113: prog_hc = 24'h000070;
+	114: prog_hc = 24'h000004;      // P:$72 rti
 	default: prog_hc = 24'h000000;  // nop
 	endcase
 endfunction
@@ -247,7 +268,7 @@ task automatic dsp_boot(input bit hc, input bit left = 1'b0);
 	scr2[28] = 1'b1; scr2[27] = 1'b0;          // mode 1: bootstrap from the host
 	repeat (5) @(negedge clk);
 	scr2[31] = 1'b1;                           // start
-	if (hc) for (int i = 0; i < 92; i++) send_word(prog_hc(i, left));
+	if (hc) for (int i = 0; i < 115; i++) send_word(prog_hc(i, left));
 	else    for (int i = 0; i < 12; i++) send_word(PROG[i]);
 	wr(ICR, 8'h08);                            // HF0: the bootstrap ends, the program runs
 endtask
@@ -469,25 +490,61 @@ initial begin : test
 		repeat (8) @(negedge clk);
 		rd(CVR, v); check(v == 8'h12, $sformatf("CVR %02x a few clocks after the command: HC clear", v));
 		wr(CVR, 8'h12);
-		// until the handler has returned the host must not see the DSP idle
-		// (HF2 and HF3 clear): a host message started there is what HF3 then
-		// blocks, and NeXTSTEP resets the DSP
+		// until the handler has returned the host sees HF3 alone: never the
+		// DSP idle (a host message started there is what HF3 then blocks),
+		// and not HF2 alone, which NeXTSTEP 3.3's libdsp (DSPAwaitHF3Clear)
+		// takes for room in the timed message queue
 		ok = 1'b0;
 		for (k = 0; k < 5000 && !ok; k++) begin
 			rd(ISR, v);
-			if (v[4]) ok = 1'b1;
-			else if (!v[3]) begin
-				check(1'b0, $sformatf("ISR %02x: the host saw the DSP idle inside the command", v));
+			if (dut.hc_pend == 2'd0) ok = 1'b1;
+			else if (v[3] || !v[4]) begin
+				check(1'b0, $sformatf("ISR %02x inside the command: HF3 alone", v));
 				break;
 			end
 			repeat (3) @(negedge clk);
 		end
-		check(ok, "HF3: the $12 handler ran, the CVR write after it did not cancel it");
+		check(ok, "the $12 handler returned");
+		// the handler's own HF3: it ran, the CVR write after it did not cancel it
 		rd(ISR, v); check(!v[3] && v[4], $sformatf("after the handler: HF2 clear, HF3 set (ISR %02x)", v));
 		recv_word(w); check(w == 24'h050001,
 			$sformatf("the first word after the INIT is the DSP's next message: %06x", w));
 		repeat (40 * arm_every) @(negedge clk);
 		rd(ISR, v); check(!v[0], $sformatf("nothing more for the host (ISR %02x)", v));
+		wr(ICR, 8'h08);
+	end
+
+	// A host message: words, then host command $13 (XHM).  The host checks
+	// TRDY before the command; a 56001 has read the words within a
+	// microsecond, so TRDY comes as soon as the last word is on the link
+	// (NeXTSTEP's driver resets the DSP when a DMA buffer ends while its
+	// queue waits for TRDY), and Main takes the command only after the DSP
+	// has read the words before it: the handler counts all three.
+	$display("host message: TRDY at once, the command after its words");
+	begin : hmsg
+		logic [23:0] base;
+		wr(CVR, 8'h93); recv_word(base);
+		for (k = 0; k < 2000 && dut.hc_pend != 2'd0; k++) @(negedge clk);
+		for (k = 0; k < 3; k++) send_word(24'h000100 + k);
+		ok = 1'b0;
+		for (k = 0; k < 20 && !ok; k++) begin rd(ISR, v); ok = v[2]; end
+		check(ok, $sformatf("TRDY as soon as the words are on the link (ISR %02x)", v));
+		wr(CVR, 8'h93); recv_word(w);
+		check(w == base + 24'd3, $sformatf("the command after the 3 words: %0d words read", w - base));
+		for (k = 0; k < 2000 && dut.hc_pend != 2'd0; k++) @(negedge clk);
+
+		// The same while the DSP spins on HF1 with host interrupts masked
+		// (the monitor's host_xmt handler after a DMA read request): it
+		// cannot read the word, so the command waits, and the host's HF1 must
+		// get past it or both wait for ever.
+		$display("host message while the DSP waits for HF1");
+		wr(CVR, 8'h94);
+		repeat (20 * arm_every) @(negedge clk);
+		send_word(24'h000555);
+		wr(CVR, 8'h93);
+		wr(ICR, 8'h18);                        // HF1 (and HF0)
+		recv_word(w);
+		check(w == base + 24'd4, $sformatf("after HF1 the word, then the command: %0d words read", w - base));
 		wr(ICR, 8'h08);
 	end
 

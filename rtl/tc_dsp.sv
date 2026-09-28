@@ -25,13 +25,25 @@
 //               hc_holds), so the DSP sees them in the host's order.  From
 //               the command until Main reports its handler returned
 //               ("host command done", after the handler's last HCR write)
-//               ISR HF2/HF3 read 1/0 ("executing a host message"): the host
+//               ISR HF2/HF3 read 0/1 ("timed message queue full"): the host
 //               never sees the DSP idle (both clear) or aborted (both set) in
 //               between -- the Music Kit monitor relies on HF3 not turning on
-//               inside a host message (smsrc misc.asm).
-//    $8002 ISR  r    bit 0 RXDF, 1 TXDE, 2 TRDY (TXDE and the DSP has read
-//               every word), 3 HF2, 4 HF3 (from the DSP's HCR), 6 DMA
-//               (HM != 0), 7 HREQ = (ICR & ISR) bits 1:0 (dsp_core.c:1048).
+//               inside a host message (smsrc misc.asm).  The monitor itself
+//               shows 1/0 inside a handler, for microseconds; here a handler
+//               lasts up to milliseconds, and NeXTSTEP 3.3's libdsp waits for
+//               HF3 alone (DSPAwaitHF3Clear) before queueing a timed message:
+//               with 1/0 it queued one that then blocked the sound driver's
+//               queue on the handler's final HF3, and the driver reset the
+//               DSP at the next DMA buffer end (mach_kernel dsp_dev_loop).
+//    $8002 ISR  r    bit 0 RXDF, 1 TXDE, 2 TRDY, 3 HF2, 4 HF3 (from the DSP's
+//               HCR), 6 DMA (HM != 0), 7 HREQ = (ICR & ISR) bits 1:0
+//               (dsp_core.c:1048).  TRDY (TX and HRX empty) is 1 as soon as
+//               the host's last word is on the link: a 56001 reads a host
+//               word within a microsecond, and NeXTSTEP's driver resets the
+//               DSP when a DMA buffer ends while its queue waits for TRDY
+//               before a host command.  Main keeps TRDY's promise: it takes
+//               a host command only after the DSP has read the words before
+//               it (next_dsp.cpp).  Words still flow on TXDE (below).
 //    $8003 IVR  r/w  reset $0F.
 //    $8004 TRX0 reads 0 (the unpacked DMA's pad byte), writes ignored.
 //    $8005/6/7 RXH/M/L read, TXH/M/L write.  Reading RXL takes the word
@@ -148,13 +160,13 @@ wire [7:0] epoch = {rgen, itx, irx};
 
 wire        rxdf     = (rx_cnt != 3'd0);
 wire        txde     = !tx_full && (tx_out < K_TX[2:0]);
-wire        trdy     = txde && (tx_out == 3'd0);
+wire        trdy     = !tx_full;       // the words are on the link (Main orders a command after them)
 wire  [1:0] dma_mode = icr[6:5];
 wire        hreq     = (icr[0] && rxdf) || (icr[1] && txde);
-// while a host command's handler runs the host sees "executing a host
-// message" (HF2 set, HF3 clear: the monitor's begin_interrupt_handler),
-// then the handler's final flags -- never idle, never "aborted" (both)
-wire  [1:0] hf_view  = (hc_pend != 2'd0) ? 2'b01 : hf23;
+// while a host command's handler runs the host sees HF3 ("timed message
+// queue full"), then the handler's final flags -- never idle, never
+// "aborted" (both); see CVR above for why not the monitor's own HF2
+wire  [1:0] hf_view  = (hc_pend != 2'd0) ? 2'b10 : hf23;
 wire  [7:0] isr      = {hreq, dma_mode != 2'd0, 1'b0, hf_view, trdy, txde, rxdf};
 wire [23:0] rx_view  = rxdf ? rxq[rx_rd] : rx_last;
 
