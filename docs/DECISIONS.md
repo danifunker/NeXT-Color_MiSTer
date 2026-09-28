@@ -171,6 +171,24 @@ as "HS §n") and in the Previous r1851 sources under `scratch/resources/`.
   the DSP (playscore -w stalled so, 2026-09-27).  Letting the host's INIT
   in before the handler (Main f60f002) was wrong; Main 07e9c29.
 
+- **The DSP is parked for the 2026-09-28 release (user)** -- `NEXT_NO_DSP` in
+  the qsf leaves tc_dsp out and its registers read 0, as before the DSP
+  work; the release's Main is `releases/MiSTer` (f2d08a5, no DSP code).
+  State when parked: CoventryCarol, Examp1, Examp3 render with
+  `playscore -w`; BachFugue, Twilight, Jungle hang because NeXTSTEP's sound
+  driver resets the DSP (mach_kernel dsp_dev_loop: any DSP interrupt while
+  DMA state 3, i.e. between a DMA read buffer's completion and its queued
+  HOST_R_DONE + INIT) whenever its queue has to wait there.  A 56001 never
+  makes it wait long; this DSP (1/8 speed, behind a link, the monitor masking
+  host interrupts while it computes a tick) does.  Closed so far: the ack
+  order (Main 07e9c29), TRDY and HF3-while-a-command (FPGA 65b3d6d + Main
+  b06902a), host words acknowledged when queued (Main 35cfed3).  Left: TXDE
+  dips while more than 2 host words await the ARM's acknowledgement (fix: a
+  deep TX count in the FPGA, K_TX ~64, Main's queue margin to match), and a
+  command's handler (~0.1-2 ms here) blocks the driver's next host message
+  (inherent: needs a faster DSP -- ARM interpreter work, or a DSP in the
+  FPGA).
+
 ## SCSI CD-ROM (2026-09-27)
 
 - **The CD-ROM drive (target 3) is always on the bus**, empty or not, like
