@@ -546,6 +546,25 @@ initial begin : test
 		recv_word(w);
 		check(w == base + 24'd4, $sformatf("after HF1 the word, then the command: %0d words read", w - base));
 		wr(ICR, 8'h08);
+		for (k = 0; k < 2000 && dut.hc_pend != 2'd0; k++) @(negedge clk);
+
+		// A whole host message while the DSP cannot read (host interrupts
+		// masked -- the monitor computing a tick): the host still gets TXDE
+		// for every word, as from a 56001 that reads them within microseconds
+		// (NeXTSTEP's driver waits ~100 us per word, then resets the DSP if a
+		// DMA buffer ends meanwhile); the DSP reads them all later, in order.
+		$display("host message while the DSP cannot read");
+		wr(CVR, 8'h94);
+		repeat (20 * arm_every) @(negedge clk);
+		for (k = 0; k < 20; k++) begin
+			wait_isr(1, 1'b1, 200, $sformatf("TXDE for word %0d while the DSP cannot read", k), ok);
+			send_word(24'h000600 + k);
+		end
+		wr(CVR, 8'h93);
+		wr(ICR, 8'h18);
+		recv_word(w);
+		check(w == base + 24'd24, $sformatf("then all 20 words, then the command: %0d words read", w - base));
+		wr(ICR, 8'h08);
 	end
 
 	$display("DSP instructions run: %0d in %0d ARM passes, mailbox words: %0d, simulated %0t",
