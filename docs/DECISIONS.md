@@ -142,17 +142,24 @@ as "HS §n") and in the Previous r1851 sources under `scratch/resources/`.
   ARM through a DDR3 mailbox at $30400000 (protocol in
   support/next/next_dsp.cpp).  A DSP core in the FPGA would plug in behind
   the same host port later.
-- **TRDY needs an exact count of the words with the DSP.**  The FPGA
-  counts TX words sent to the ARM minus "HRX read" acknowledgements
-  (tx_out); TXDE = fewer than 2, TRDY = none.  libdsp's host messages wait
-  for CVR HC 0, ISR TRDY 1, HF2 0, HF3 0 (`_DSPWriteHostMessage`,
-  hm_mask $801C00 / hm_flags $000400 over {ICR,CVR,ISR,IVR}), so one lost
-  acknowledgement hangs the Music Kit for good while plain TX writes (TXDE)
-  keep working.  tx_out has one update per clock.
+- **TXDE counts the words with the DSP; TRDY does not wait for them.**  The
+  FPGA counts TX words sent to the ARM minus "HRX read" acknowledgements
+  (tx_out, one update per clock -- a lost acknowledgement once hung the
+  Music Kit); TXDE = fewer than 2, and NeXTSTEP's driver polls TXDE before
+  every word.  TRDY (libdsp's host messages wait for CVR HC 0, ISR TRDY 1,
+  HF2 0, HF3 0 before the XHM command) is 1 as soon as the last word left TX,
+  as a 56001 reads a host word within a microsecond: waiting a link round
+  trip let a DMA buffer end while the driver's queue waited, and the driver
+  then reset the DSP (mach_kernel dsp_dev_loop, DMA state 3; BachFugue,
+  Twilight).  Main keeps the promise: a host command waits until the DSP
+  has read the words before it, while the host's other accesses (but not a
+  CVR write or an INIT) pass it (Main b06902a).
 - **Host commands: taken at once for the host, run before its next access
   on the DSP side.**  The FPGA clears CVR HC as soon as the command is on
   the link (NeXTSTEP resets a DSP that has not taken one in ~0.5 ms) and
-  shows HF2 until the handler returns.  Main holds the host's later
+  shows HF3 alone until the handler returns (never idle, never aborted; not
+  the monitor's own HF2, which NeXTSTEP 3.3's libdsp, waiting for HF3 alone,
+  takes for room in the timed message queue -- Jungle hung so).  Main holds the host's later
   accesses while the command is pending and while its handler runs (until
   it returns, spins on the host port, or 256 instructions), as a 56001 is
   well ahead of the 68040.  NeXTSTEP's sound driver (mach_kernel
