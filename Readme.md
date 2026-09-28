@@ -111,8 +111,8 @@ are listed in the MiSTer.ini that ships with MiSTer (for example `9` is
 1920x1080@50).
 
 The picture goes out over HDMI through the MiSTer scaler. The native signal
-has a 61.3 kHz line rate; the analog output has not been tried, and there is
-no composite or S-Video output (see Building).
+has a 61.3 kHz line rate; the analog output has not been tried, has no OSD
+menu, and there is no composite or S-Video output (see Building).
 
 ## Disks
 
@@ -198,13 +198,16 @@ be lost.
 ### Build switches in `NeXT-Color.qsf`
 
 The MiSTer framework (`sys/`) and the CPU core have compile-time switches.
-This core sets these:
+`sys/` is the stock framework except for one added switch
+(`MISTER_DISABLE_VGA_OSD`, below); keep it when updating `sys/`. This core
+sets these:
 
 | Switch | Set | What it does |
 |---|---|---|
 | `MISTER_DISABLE_ADAPTIVE` | yes (since the first build, from the MacQuadra800 recipe) | Removes the scaler's adaptive scanline filtering, a CRT-style effect of no use on a desktop; saves logic in the HDMI scaler, where timing is tightest |
 | `MISTER_DISABLE_ALSA` | yes (since the first build, from the MacQuadra800 recipe) | Removes the path that mixes Linux-side (ALSA) audio into the core's audio output; the NeXT's own sound is not affected |
 | `MISTER_DISABLE_YC` | yes (2026-09-27) | Removes the composite / S-Video (Y/C) encoder of the analog output. The NeXT picture has a 61.3 kHz line rate (1120x832 at 68.4 Hz), which no composite or S-Video input can show, so the encoder never had a use here; its logic and multipliers are freed |
+| `MISTER_DISABLE_VGA_OSD` | yes (2026-09-27) | No OSD menu on the analog output; HDMI keeps its OSD. Not a stock switch: `sys/sys_top.v` carries it from MacQuadra800_MiSTer's `sys/` (the analog video passes straight through, and the core's OSD-open input reads 0, which this core does not use). Frees ~514 ALMs |
 | `AP040_EXPERIMENTAL_XSTORE`, `AP040_EXPERIMENTAL_LEA` | yes | 68040 core options, as in the validated MacQuadra800 build: stores that cross a data-cache line, and a faster LEA/PEA address path |
 
 And leaves these off:
@@ -257,6 +260,7 @@ MISTER_DOWNSCALE_NN      | Ascal's downscale mode
 MISTER_DISABLE_ADAPTIVE  | Disables adaptive scan lines
 MISTER_DISABLE_YC        | Disables the Y/C (composite / S-Video) output
 MISTER_DISABLE_ALSA      | Disables mixing Linux (ALSA) audio into the core's audio output
+MISTER_DISABLE_VGA_OSD   | No OSD on the analog output (added to this core's sys/, from MacQuadra800_MiSTer)
 MISTER_FB_PALETTE        | Framebuffer palette
 
 

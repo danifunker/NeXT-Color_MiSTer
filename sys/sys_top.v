@@ -1400,6 +1400,14 @@ scanlines #(0) VGA_scanlines
 
 wire [23:0] vga_data_osd;
 wire        vga_vs_osd, vga_hs_osd, vga_de_osd;
+`ifdef MISTER_DISABLE_VGA_OSD
+// No OSD overlay on the analog output (and no OSD-open status to the core):
+// the video passes straight through.  From MacQuadra800_MiSTer's sys/.
+assign vga_data_osd = vga_data_sl;
+assign vga_hs_osd   = vga_hs_sl;
+assign vga_vs_osd   = vga_vs_sl;
+assign vga_de_osd   = vga_de_sl;
+`else
 osd vga_osd
 (
 	.clk_sys(clk_sys),
@@ -1420,6 +1428,7 @@ osd vga_osd
 	.vs_out(vga_vs_osd),
 	.de_out(vga_de_osd)
 );
+`endif
 
 wire vga_cs_osd;
 csync csync_vga(clk_vid, vga_hs_osd, vga_vs_osd, vga_cs_osd);
@@ -1725,7 +1734,11 @@ wire uart_rts;
 wire uart_rxd;
 wire uart_txd;
 
+`ifdef MISTER_DISABLE_VGA_OSD
+wire osd_status = 1'b0;   // no OSD: never reported open to the core
+`else
 wire osd_status;
+`endif
 
 wire        fb_en;
 wire  [4:0] fb_fmt;

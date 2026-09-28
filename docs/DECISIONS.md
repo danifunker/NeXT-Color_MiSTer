@@ -178,6 +178,9 @@ as "HS §n") and in the Previous r1851 sources under `scratch/resources/`.
 ## Repository and hardware
 
 - Commit milestones on **`master`** until told otherwise. No worktrees.
-- `sys/` is the stock template (verified identical to `../Template_MiSTer/sys`).
+- `sys/` is the stock template (verified identical to `../Template_MiSTer/sys`)
+  except `sys/sys_top.v`'s `MISTER_DISABLE_VGA_OSD` switch (2026-09-27, user:
+  no OSD on the analog output, ~514 ALMs), taken from MacQuadra800_MiSTer's
+  `sys/`.  Keep it when updating `sys/`.
 - MiSTer for bring-up: **192.168.99.143** (`scripts/local.env`). Nothing is
   deployed without asking.
