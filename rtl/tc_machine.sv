@@ -245,7 +245,11 @@ function [3:0] dev_decode;
 		else if ((a & 17'h1F000) == 17'h06000)                                    dev_decode = D_ENET;  // $1F00F
 		else if ((a & 17'h1F800) == 17'h07000)                                    dev_decode = D_INTS;  // $1F803
 		else if ((a & 17'h1F800) == 17'h07800)                                    dev_decode = D_INTM;
+`ifdef NEXT_NO_DSP
+		else if ((a & 17'h1E003) == 17'h08000)                                    dev_decode = D_ZERO;  // DSP $1E007: none
+`else
 		else if ((a & 17'h1E003) == 17'h08000)                                    dev_decode = D_DSP;   // DSP $1E007
+`endif
 		else if ((a & 17'h1F000) == 17'h0C000)                                    dev_decode = D_SCR1;  // $1F803 (C000, C800)
 		else if ((a & 17'h1F000) == 17'h0D000)                                    dev_decode = D_SCR2;  // $1F003
 		else if ((a & 17'h1F000) == 17'h0E000)                                    dev_decode = D_KMS;   // $1F00F
@@ -619,12 +623,21 @@ tc_enet enet (
 
 // DSP56001 host port (Previous ioMemTabTurbo.c:130-137): rtl/tc_dsp.sv, the
 // 68040's side; the DSP runs on the ARM (Main_MiSTer support/next/next_dsp.cpp)
-// behind a DDR3 mailbox at $30400000.
+// behind a DDR3 mailbox at $30400000.  NEXT_NO_DSP (qsf) leaves it out: the
+// registers read 0 as before the DSP work, and the Music Kit's DSP use is
+// parked (docs/DECISIONS.md "Sound and DSP").
 wire [31:0] dsp_rdata;  wire dsp_ack;
 wire        ds_m_req, ds_m_we;
 wire [28:0] ds_m_addr;
 wire [63:0] ds_m_wdata;
 wire        ds_m_ack;
+`ifdef NEXT_NO_DSP
+assign dsp_rdata = 32'd0;  assign dsp_ack = 1'b0;
+assign int_dsp = 1'b0;
+assign dd_req = 1'b0;  assign dd_we = 1'b0;  assign dd_wdata = 8'd0;
+assign ds_m_req = 1'b0;  assign ds_m_we = 1'b0;
+assign ds_m_addr = 29'd0;  assign ds_m_wdata = 64'd0;
+`else
 tc_dsp #(.CLK_HZ(CLK_HZ)) dsp (
 	.clk(clk), .reset(dev_rst),
 	.stb(io_stb && io_dev == D_DSP && !io_tmc), .we(io_we),
@@ -636,6 +649,7 @@ tc_dsp #(.CLK_HZ(CLK_HZ)) dsp (
 	.m_req(ds_m_req), .m_we(ds_m_we), .m_addr(ds_m_addr), .m_wdata(ds_m_wdata),
 	.m_rdata(enet_m_rdata), .m_ack(ds_m_ack)
 );
+`endif
 
 // The DDR3 mailbox port (tc_enet_ddr in the top) serves the Ethernet bridge
 // and the DSP link, one 64-bit word at a time.  Both hold m_req until m_ack;

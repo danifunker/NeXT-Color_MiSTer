@@ -100,6 +100,8 @@ set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_YC=1"
 # No OSD on the analog output (HDMI keeps it): sys/sys_top.v carries
 # MacQuadra800_MiSTer's MISTER_DISABLE_VGA_OSD switch; ~514 ALMs (2026-09-27).
 set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_VGA_OSD=1"
+# the DSP56001 (tc_dsp + Main next_dsp) is parked: its registers read 0
+set_global_assignment -name VERILOG_MACRO "NEXT_NO_DSP=1"
 set_global_assignment -name VERILOG_MACRO "AP040_EXPERIMENTAL_XSTORE=1"
 set_global_assignment -name VERILOG_MACRO "AP040_EXPERIMENTAL_LEA=1"
 
