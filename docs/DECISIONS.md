@@ -149,6 +149,20 @@ as "HS §n") and in the Previous r1851 sources under `scratch/resources/`.
   hm_mask $801C00 / hm_flags $000400 over {ICR,CVR,ISR,IVR}), so one lost
   acknowledgement hangs the Music Kit for good while plain TX writes (TXDE)
   keep working.  tx_out has one update per clock.
+- **Host commands: taken at once for the host, run before its next access
+  on the DSP side.**  The FPGA clears CVR HC as soon as the command is on
+  the link (NeXTSTEP resets a DSP that has not taken one in ~0.5 ms) and
+  shows HF2 until the handler returns.  Main holds the host's later
+  accesses while the command is pending and while its handler runs (until
+  it returns, spins on the host port, or 256 instructions), as a 56001 is
+  well ahead of the 68040.  NeXTSTEP's sound driver (mach_kernel
+  dsp_dev_loop) ends every DMA read buffer with HOST_R_DONE, waits only for
+  HC clear and INITs the receive side; the Music Kit monitor's ack must be
+  in HTX by then so the INIT flushes it, because the driver takes the first
+  word after the INIT as the next DMA request and files any other word in
+  the application's message buffer, where a full buffer stops it reading
+  the DSP (playscore -w stalled so, 2026-09-27).  Letting the host's INIT
+  in before the handler (Main f60f002) was wrong; Main 07e9c29.
 
 ## SCSI CD-ROM (2026-09-27)
 
